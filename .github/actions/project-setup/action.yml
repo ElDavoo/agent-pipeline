@@ -1,0 +1,49 @@
+name: Project setup
+description: >
+  Whatever this repository needs on a runner before an agent can build or test it — a language
+  toolchain, an SDK, a package manager, caches. The implement and fix stages call this action
+  by this exact path, so it has to exist and it has to be named `project-setup`.
+
+  REPLACE THE BODY. What ships here is a no-op that succeeds, so the pipeline runs end to end on
+  a repository that needs nothing installed — a docs repo, a shell-script repo, anything the
+  ubuntu-latest image already covers. For anything else this is where the setup goes.
+
+  Keep it cached. The fix loop can call this ten times for one issue, and an uncached toolchain
+  download is ten times the wait and ten times the flake surface.
+
+runs:
+  using: composite
+  steps:
+    # ---------------------------------------------------------------------------------------
+    # Delete this step and put your own setup here. Some starting points:
+    #
+    #   Node
+    #     - uses: actions/setup-node@v4
+    #       with: { node-version: '22', cache: npm }
+    #     - run: npm ci
+    #       shell: bash
+    #
+    #   Python
+    #     - uses: actions/setup-python@v5
+    #       with: { python-version: '3.12', cache: pip }
+    #     - run: pip install -e '.[dev]'
+    #       shell: bash
+    #
+    #   Go
+    #     - uses: actions/setup-go@v5
+    #       with: { go-version: '1.23', cache: true }
+    #
+    #   JVM / Gradle
+    #     - uses: actions/setup-java@v4
+    #       with: { distribution: temurin, java-version: '21' }
+    #     - uses: gradle/actions/setup-gradle@v4
+    #
+    #   Rust
+    #     - uses: dtolnay/rust-toolchain@stable
+    #     - uses: Swatinem/rust-cache@v2
+    # ---------------------------------------------------------------------------------------
+    - name: No toolchain configured
+      shell: bash
+      run: |
+        echo "::notice::.github/actions/project-setup is still the stub — no toolchain installed."
+        echo "If this repository needs one, edit .github/actions/project-setup/action.yml."

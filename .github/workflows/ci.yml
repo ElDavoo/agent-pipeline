@@ -1,0 +1,40 @@
+name: CI
+
+# The workflow agent-fix-ci.yml watches. Its `name:` above and the `workflows:` list in
+# agent-fix-ci.yml must match exactly — that is the one string in this pipeline that cannot be
+# a variable, because `workflow_run` matches it before any expression is evaluated.
+#
+# If this repository already has its own CI, delete this file and put that workflow's name into
+# agent-fix-ci.yml instead. This exists so a fresh copy of the template has a working loop
+# before you have configured anything.
+#
+# It runs the same .github/scripts/agent-gates.sh the agent runs. That is deliberate: when CI
+# and the agent disagree about what passing means, every disagreement costs a full fix round to
+# discover. Slow legs that do not belong in an agent's turn — an emulator matrix, a release
+# build — go in jobs of their own beside this one.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up the toolchain
+        uses: ./.github/actions/project-setup
+
+      - name: Gates
+        run: .github/scripts/agent-gates.sh
