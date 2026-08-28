@@ -32,13 +32,10 @@ on:
         required: false
         type: string
 
-permissions:
-  contents: read
-  # The action fetches a GitHub OIDC token on every run, including the OAuth path, and
-  # fails after three retries without this. claude.yml has carried it since day one.
-  id-token: write
-  issues: write
-  pull-requests: write
+# Granted per job rather than here: a workflow-level block hands the same token to the gate
+# as to the stage that runs the agent, and the gate exists precisely to decide whether the
+# agent should run at all.
+permissions: {}
 
 concurrency:
   group: agent-issue-${{ inputs.issue }}
@@ -48,6 +45,8 @@ jobs:
   # Same predicate as the plan stage: could the issue's author have pushed this change
   # themselves? See the comment on agent-plan.yml's triage job.
   triage:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     outputs:
       trusted: ${{ steps.who.outputs.trusted }}
@@ -69,6 +68,8 @@ jobs:
           echo "trusted=${trusted}" >> "$GITHUB_OUTPUT"
 
   gate:
+    permissions:
+      contents: read
     needs: [triage]
     if: needs.triage.outputs.trusted != 'true'
     runs-on: ubuntu-latest
@@ -81,6 +82,11 @@ jobs:
         run: echo "Approved by $APPROVER for issue $ISSUE"
 
   implement:
+    permissions:
+      contents: read
+      id-token: write
+      issues: write
+      pull-requests: write
     needs: [triage, gate]
     if: >-
       always()
@@ -92,7 +98,8 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        # the PAT below is what pushes this branch, so it has to persist.
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7  # zizmor: ignore[artipacked]
         with:
           # The PAT, not GITHUB_TOKEN. A branch pushed with GITHUB_TOKEN triggers no workflow
           # runs at all, so CI would never run on the pull request and the auto-merge

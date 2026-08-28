@@ -32,9 +32,56 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Set up the toolchain
         uses: ./.github/actions/project-setup
 
       - name: Gates
         run: .github/scripts/agent-gates.sh
+
+  # The pipeline is eight workflow files whose only test is running them, and a mistake in one
+  # is discovered by an issue quietly doing nothing. actionlint type-checks every ${{ }}
+  # expression against the event payload and runs shellcheck over each `run:` block; zizmor
+  # audits the same files for what shellcheck has no opinion about -- unpinned actions,
+  # permissions wider than a job needs, credentials left in .git/config, secrets inherited
+  # wholesale by a called workflow.
+  #
+  # This matters more here than in a repository that merely uses the pipeline: what is wrong in
+  # this template is wrong in every copy of it. Both findings fixed in this commit had already
+  # been copied into a downstream repository before anything noticed.
+  #
+  # Both are downloaded and checksum-pinned rather than taken from an action: a workflow that
+  # insists every action is pinned to a hash should not fetch its own linters unpinned.
+  workflows:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Check the workflows
+        env:
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+          ZIZMOR_SHA256: dd96df044a6e8538d5f423790f453bdd03d49e5b2bcc38214acc41a2f1297839
+        run: |
+          set -euo pipefail
+
+          curl -fsSL -o /tmp/actionlint.tar.gz \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          echo "${ACTIONLINT_SHA256}  /tmp/actionlint.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/actionlint.tar.gz -C /tmp actionlint
+          /tmp/actionlint -color
+
+          # --offline: the online audits agree with the offline ones here, and a gate that needs
+          # a token and the network fails for reasons of its own.
+          curl -fsSL -o /tmp/zizmor.tar.gz \
+            https://github.com/zizmorcore/zizmor/releases/download/v1.29.0/zizmor-x86_64-unknown-linux-gnu.tar.gz
+          echo "${ZIZMOR_SHA256}  /tmp/zizmor.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/zizmor.tar.gz -C /tmp zizmor
+          /tmp/zizmor --offline --color=always .github/workflows/
