@@ -32,6 +32,16 @@ on:
         description: Failed job logs, or the unresolved review findings. Pre-truncated by the caller.
         required: true
         type: string
+    # Declared rather than inherited. `secrets: inherit` hands the called workflow every secret
+    # the caller holds, which in a real repository is a publishing token and a coverage token
+    # and whatever else has accumulated -- none of which the fix stage has any business reading.
+    # Naming the two it uses costs a line at each call site and bounds the blast radius of a
+    # prompt injection to those two.
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN:
+        required: true
+      AGENT_PUSH_TOKEN:
+        required: true
 
 permissions:
   contents: read
@@ -92,6 +102,9 @@ jobs:
 
     steps:
       - name: Checkout the agent branch
+        # zizmor: ignore[artipacked]
+        # The persisted credential is the point here: this stage commits and pushes the branch,
+        # and it must be the PAT rather than GITHUB_TOKEN or the push triggers no CI at all.
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           token: ${{ secrets.AGENT_PUSH_TOKEN }}
@@ -270,7 +283,9 @@ jobs:
         continue-on-error: true
         run: |
           set -uo pipefail
-          [ -x .github/scripts/agent-gates.sh ] && .github/scripts/agent-gates.sh || true
+          if [ -x .github/scripts/agent-gates.sh ]; then
+            .github/scripts/agent-gates.sh || true
+          fi
 
       - name: Commit and push
         if: steps.round.outputs.stuck != 'true'

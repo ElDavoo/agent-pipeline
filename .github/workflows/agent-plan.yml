@@ -18,12 +18,10 @@ on:
   issues:
     types: [opened]
 
+# Only the job that actually runs the agent gets more than read. The triage and gate jobs see
+# the same issue and hold nothing that could rewrite it.
 permissions:
   contents: read
-  # The action fetches a GitHub OIDC token on every run, including the OAuth path, and
-  # fails after three retries without this. claude.yml has carried it since day one.
-  id-token: write
-  issues: write
 
 # Per issue, never cancelling. Two events for one issue should serialise rather than race, and
 # a cancelled stage that had already edited the body would leave a half-planned issue behind.
@@ -85,6 +83,12 @@ jobs:
         run: echo "Approved by $APPROVER for issue $ISSUE"
 
   plan:
+    permissions:
+      contents: read
+      # The action fetches a GitHub OIDC token on every run, including the OAuth path, and
+      # fails after three retries without this. claude.yml has carried it since day one.
+      id-token: write
+      issues: write
     needs: [triage, gate]
     # `always()` is load-bearing and not decoration: without it a *skipped* gate skips this job
     # too, and skipped is exactly the path a maintainer's own issues take. A rejected deployment
@@ -102,6 +106,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # This stage only reads the code -- it writes the plan into the issue body over the
+          # API. An agent runs in this checkout, so leaving a push-capable credential in
+          # .git/config would hand it a way around the disallowed `git push` above.
+          persist-credentials: false
 
       # A cap on work in flight, not on work queued. Three open agent PRs is already more diff
       # than one person reviews in an evening, and the failure mode this exists for is a bad

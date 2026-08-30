@@ -23,15 +23,6 @@ on:
 
 permissions:
   contents: read
-  # The action fetches a GitHub OIDC token on every run, including the OAuth path, and
-  # fails after three retries without this. claude.yml has carried it since day one.
-  id-token: write
-  # write, not read, for two reasons that both bite: this workflow calls agent-fix.yml, and a
-  # called workflow cannot hold a permission its caller lacks -- with `read` here the whole run
-  # fails at startup, no jobs and no logs. And the stall path labels the issue, so `read` could
-  # never have recorded a stalled review either.
-  issues: write
-  pull-requests: write
 
 concurrency:
   group: agent-review-${{ github.event.pull_request.number }}
@@ -39,6 +30,15 @@ concurrency:
 
 jobs:
   review:
+    permissions:
+      contents: read
+      # The action fetches a GitHub OIDC token on every run, including the OAuth path, and
+      # fails after three retries without this. claude.yml has carried it since day one.
+      id-token: write
+      # write, not read: the stall path labels the issue, and the verdict step requests changes
+      # on the pull request.
+      issues: write
+      pull-requests: write
     if: >-
       startsWith(github.head_ref, 'agent/issue-')
       && !github.event.pull_request.draft
@@ -57,6 +57,9 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
+          # The reviewer reads the diff and files findings over the API; it never pushes, and
+          # a credential left in .git/config would be reachable from inside its own checkout.
+          persist-credentials: false
 
       - name: Identify the issue behind the branch
         id: ctx
@@ -234,10 +237,20 @@ jobs:
         run: gh pr review "$PR" --request-changes --body-file /tmp/summary.txt
 
   fix:
+    # A called workflow cannot hold a permission its caller lacks, so these are agent-fix.yml's
+    # requirements restated -- with `read` here the whole run fails at startup, no jobs and no
+    # logs to read.
+    permissions:
+      contents: read
+      id-token: write
+      issues: write
+      pull-requests: write
     needs: [review]
     if: needs.review.outputs.approved == 'false'
     uses: ./.github/workflows/agent-fix.yml
-    secrets: inherit
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+      AGENT_PUSH_TOKEN: ${{ secrets.AGENT_PUSH_TOKEN }}
     with:
       pr: ${{ github.event.pull_request.number }}
       issue: ${{ needs.review.outputs.issue }}

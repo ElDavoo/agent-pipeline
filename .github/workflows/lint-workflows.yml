@@ -1,0 +1,52 @@
+name: Lint the workflows
+
+# actionlint type-checks every ${{ }} expression against the event payload and runs shellcheck
+# over each `run:` block; zizmor audits the same files for the supply-chain and permissions
+# mistakes shellcheck has no opinion about.
+#
+# This is a file of its own rather than a job in ci.yml because ci.yml is meant to be deleted:
+# a repository that already has CI replaces it, and the linting should not go with it. Nothing
+# here is project-specific, and the pipeline's own files are the ones it protects.
+#
+# Both tools are downloaded and checksum-pinned rather than taken from an action, since a
+# workflow that exists to insist every action is pinned to a hash should not fetch its own
+# linters unpinned. zizmor runs --offline: the online audits need a token and the network, and
+# a gate that fails for reasons of its own is a gate people learn to ignore.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Check the workflows
+        env:
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+          ZIZMOR_SHA256: dd96df044a6e8538d5f423790f453bdd03d49e5b2bcc38214acc41a2f1297839
+        run: |
+          set -euo pipefail
+
+          curl -fsSL -o /tmp/actionlint.tar.gz \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          echo "${ACTIONLINT_SHA256}  /tmp/actionlint.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/actionlint.tar.gz -C /tmp actionlint
+          /tmp/actionlint -color
+
+          curl -fsSL -o /tmp/zizmor.tar.gz \
+            https://github.com/zizmorcore/zizmor/releases/download/v1.29.0/zizmor-x86_64-unknown-linux-gnu.tar.gz
+          echo "${ZIZMOR_SHA256}  /tmp/zizmor.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/zizmor.tar.gz -C /tmp zizmor
+          /tmp/zizmor --offline --color=always .github/workflows/

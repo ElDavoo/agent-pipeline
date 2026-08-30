@@ -14,24 +14,26 @@ name: Agent · fix CI
 # is also what makes it safe to give it secrets: the version of this file that executes is the
 # one on main, never the one on the branch being fixed.
 
-on:
+# workflow_run is what this stage is: it needs a finished run's logs, which no pull_request
+# event can reach. The trigger's hazard -- privileged execution against branch content -- does
+# not apply, because a workflow_run job always runs the copy of this file on the default branch,
+# and nothing here checks out or executes the branch under test.
+on: # zizmor: ignore[dangerous-triggers]
   workflow_run:
     workflows: ["CI"]
     types: [completed]
 
 permissions:
   contents: read
-  actions: read
-  issues: write
-  pull-requests: write
-  # Needed here even though nothing in this file runs the action: a called workflow cannot
-  # request a permission its caller lacks, and agent-fix.yml needs id-token for the OIDC token.
-  # Getting this wrong does not fail a job -- it fails the run at startup, with no jobs, no
-  # logs and no annotation to read.
-  id-token: write
 
 jobs:
   context:
+    # Reading only: which pull request the failed run belongs to, and the failed job's logs.
+    permissions:
+      contents: read
+      actions: read
+      issues: read
+      pull-requests: read
     if: >-
       github.event.workflow_run.conclusion == 'failure'
       && startsWith(github.event.workflow_run.head_branch, 'agent/issue-')
@@ -100,10 +102,21 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
   fix:
+    # Needed here even though nothing in this file runs the action: a called workflow cannot
+    # request a permission its caller lacks, and agent-fix.yml needs id-token for the OIDC
+    # token. Getting this wrong does not fail a job -- it fails the run at startup, with no
+    # jobs, no logs and no annotation to read.
+    permissions:
+      contents: read
+      id-token: write
+      issues: write
+      pull-requests: write
     needs: [context]
     if: needs.context.outputs.go == 'true'
     uses: ./.github/workflows/agent-fix.yml
-    secrets: inherit
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+      AGENT_PUSH_TOKEN: ${{ secrets.AGENT_PUSH_TOKEN }}
     with:
       pr: ${{ needs.context.outputs.pr }}
       issue: ${{ needs.context.outputs.issue }}

@@ -41,7 +41,13 @@ cp -r agent-pipeline/.github/actions/agent-stall     my-project/.github/actions/
 cp -r agent-pipeline/.github/actions/project-setup   my-project/.github/actions/
 cp    agent-pipeline/.github/scripts/agent-gates.sh  my-project/.github/scripts/
 cp -r agent-pipeline/.github/ISSUE_TEMPLATE          my-project/.github/
+cp    agent-pipeline/.github/workflows/lint-workflows.yml my-project/.github/workflows/
 ```
+
+That last one is optional and recommended. It runs actionlint and zizmor over
+`.github/workflows/`, which is the only test these files have; without it a mistake in one is
+found when a release quietly does nothing. It is a file of its own rather than a job in `ci.yml`
+precisely so that replacing `ci.yml` with your own does not take it with you.
 
 ### 2. Fill in the two hooks
 
@@ -252,6 +258,15 @@ in production.
 
 5. **`workflow_run.workflows` takes a literal.** No expressions, no variables. A typo is
    silence, not an error.
+
+6. **A shellcheck suppression behaves differently inside a workflow.** actionlint only runs
+   shellcheck when shellcheck is on `PATH`, so a local run without it is quieter than CI. And of
+   the three ways to write a suppression, only one works here: it must sit immediately above the
+   command it applies to, because a file-level `# shellcheck disable=` at the top of a `run:`
+   block is silently ignored; nothing may follow it on its line, or the directive fails to parse
+   and that failure is reported instead; and a prose comment beginning with the word
+   `shellcheck` is itself read as a malformed directive. A literal backtick inside single quotes
+   also reads as an expression, which is why the workflows pass one through a `tick` variable.
 
 ## What it costs
 

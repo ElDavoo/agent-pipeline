@@ -21,6 +21,12 @@ builds — so the workflows here describe how agents work rather than being run 
   changes for this reason, and that decline is load-bearing rather than conservative.
 - **Trust is write access, checked through the collaborator API**, never a login in a workflow
   file. Both the approval gate and the plan-provenance check use the same predicate.
+- **The workflows must pass `lint-workflows.yml` — actionlint and zizmor — clean.** Three zizmor
+  findings are ignored in place with the reason at the point of use and should stay: the
+  implement and fix checkouts persist the push token because that is what they push with, and
+  the CI-failure stage really is a `workflow_run`. Everything else passes as written, so a new
+  finding is a real one. Write permissions belong on the single job that needs them, never at
+  the top of a file whose other jobs run on read.
 
 ## Style
 
