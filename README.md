@@ -29,6 +29,30 @@ issue opened
    squash merge
 ```
 
+**One agent runs at a time.** Every stage above names the same concurrency group,
+`agent-pipeline`, and none of them cancels in progress — so plan, implement, review and fix queue
+behind one another across issues as much as within one.
+
+That is a token budget, not a correctness rule. A Claude subscription window is about five hours,
+and three agent runs sharing one spend it three times as fast without any of them getting
+further: every stage stops at its turn limit at once, and the window buys several half-finished
+branches instead of one merged pull request. Serialised, the same window pays for runs that
+finish. On an API key metered per token rather than a subscription window, this group is the
+first thing to loosen.
+
+Two consequences are not obvious:
+
+- **`agent-fix.yml` is deliberately outside the group.** It is a reusable workflow, so it runs
+  inside its caller's run, and the caller already holds the slot — asking for it again from a job
+  inside that run deadlocks against its own parent until the run times out. `agent-fix-ci.yml`
+  therefore declares the group at *workflow* level, not on the job that calls the fix stage.
+- **GitHub's queue depth for a group is one.** A group holds one run in flight and exactly one
+  pending; a third arrival cancels the pending one, before its first step, so nothing it would
+  have written gets written. Filing issues a few minutes apart avoids it. When it happens, the
+  implement stage is recovered — `agent:planned` with no pull request is exactly that signature,
+  and `agent-retry.yml`'s second sweep restarts it. The plan stage is not: a plan that never ran
+  leaves nothing to sweep for, so re-run it from the Actions tab.
+
 ## Setting it up
 
 ### 1. Copy the files
@@ -105,7 +129,8 @@ Two things about that PAT, both of which will bite otherwise:
   would wait forever for a check that cannot arrive. The same is true of `gh workflow run`.
 - **Do not give it `workflow` scope.** That would let an agent rewrite the review and CI gates
   that judge it, and then merge the rewrite. The cost is that the pipeline structurally cannot
-  implement an issue asking for a workflow change — the plan stage is told to decline those.
+  implement an issue asking for a workflow change — so the plan stage is told to leave those
+  out of scope and say so, rather than to refuse the issue over them.
 
 Put them in **repository** secrets, not environment secrets. An environment secret is readable
 only by a job that declares that environment, and the gate job is the only one that does — the
@@ -120,7 +145,6 @@ gh label create 'agent:planned'  -c 0e8a16 -d 'Planned, waiting to be implemente
 gh label create 'agent:working'  -c fbca04 -d 'Being implemented'
 gh label create 'agent:stalled'  -c d4c5f9 -d 'A stage stopped before finishing — will be re-run'
 gh label create 'agent:stuck'    -c d93f0b -d 'Gave up — needs a human'
-gh label create 'agent:declined' -c c5def5 -d 'Not work an agent should take unattended'
 ```
 
 ### 7. Let Actions approve pull requests
@@ -152,9 +176,13 @@ Everything below is a deliberate default, not a constant. All of it is in the wo
 | Fix rounds before giving up | `agent-fix.yml` | 10, with round 9 as an escalation |
 | Concurrent agent pull requests | `agent-plan.yml`, `MAX_OPEN_AGENT_PRS` | 3 |
 | Stall retries per stage | `agent-retry.yml`, `MAX_RETRIES` | 3, five hours apart |
-| What the plan stage refuses | `agent-plan.yml` prompt | questions, policy calls, releases, migrations, workflow changes, anything too vague to test |
+| Queue restarts per issue | `agent-retry.yml`, `MAX_RETRIES` on the second sweep | 3 |
+| How many agents run at once | `concurrency:` in every stage | 1 — one shared `agent-pipeline` group |
+| Turn budget | every `claude_args` | implement 300, fix 240, escalation 400 |
+| Job timeout | every stage | 120 minutes, except plan at 20 and review at 30 |
+| What the plan stage plans around | `agent-plan.yml` prompt | workflow files, plus whatever you add under its CUSTOMISE note — declared out of scope, never a reason to refuse the issue |
 | House rules for the implementer | `agent-implement.yml` prompt | tests with the change; comments explain why; match the surrounding code |
-| Model | every `claude_args` | `claude-opus-5` on review, default elsewhere |
+| Model and effort | every `claude_args` | `--model opus --effort medium` everywhere |
 
 **Write a `CLAUDE.md`.** Every stage is told to read it and treats it as authoritative. It is
 where the invariants that lint and tests will not catch belong — the reasoning a reviewer needs
@@ -194,7 +222,6 @@ by someone who could not have pushed the change themselves.
 | `agent:working` | pipeline | Being implemented. |
 | `agent:stalled` | pipeline | A stage stopped before finishing; the sweeper will re-run it. |
 | `agent:stuck` | pipeline | Gave up. The pull request is drafted, which disarms auto-merge. |
-| `agent:declined` | pipeline | Not work an agent should take unattended. |
 
 `no-agent` cannot work after the fact: the plan stage fires on `issues: opened`, and a label
 added a second later loses the race. That is what the issue template is for, and why
@@ -212,7 +239,7 @@ event they listen for.
 | review | Close and reopen the pull request | Not a re-run: a re-run replays the workflow file as it was, so it cannot pick up a fix to that file |
 | CI | Re-run failed jobs, or push | A push counts as a fix round; a re-run does not |
 | fix | Cannot be started directly | Reusable workflow, no trigger of its own |
-| retry sweep | `gh workflow run agent-retry.yml` | Runs itself every 5 hours |
+| retry sweep | `gh workflow run agent-retry.yml` | Runs itself every 5 hours. Also drains the queue — see below — so this is how you start an issue whose turn never came |
 
 ### When a stage stops before it finishes
 
@@ -226,6 +253,36 @@ identically every time and burns fifteen hours before saying so — so if the ru
 The retry markers are read only from comments posted by `github-actions[bot]`, and must name a
 run of this pipeline's own workflows. An issue comment is world-writable; without both checks, a
 commenter chooses which run gets re-run under a token with `actions: write`.
+
+### When a stage never gets its turn
+
+A run displaced out of the concurrency group is a different failure and needs a different handle:
+it was cancelled before its first step, so there is no stall marker to find and nothing to re-run.
+`agent-retry.yml`'s second sweep recognises the shape it leaves behind instead — an open issue
+still labelled `agent:planned`, with none of the kill-switch labels and no open `agent/issue-N`
+pull request — and dispatches **Agent · implement** for the oldest one. One issue per sweep, and
+only when no pipeline run is in flight, since starting two would undo the point of the group.
+
+Re-dispatching is safe by construction rather than by luck: the implement stage resets its branch
+from the default branch before it writes anything, and it re-reads the plan from the issue body
+rather than from the dispatch inputs. So the sweep does not have to carry a title or body, and
+cannot land the wrong plan or half of one. A redundant dispatch costs a run and rebuilds the same
+branch.
+
+It is bounded at three starts, counted the same way stalls are — `<!-- agent-queued -->` in a
+`github-actions[bot]` comment, authorship-filtered for the same reason. The bound matters because
+`agent:planned` with no pull request is not *only* what a displaced run leaves behind: a run that
+reached "nothing was changed, no pull request to open" leaves the identical trace and will leave
+it again on every sweep. Unbounded that is a complete agent run spent every five hours forever,
+which is worse than the case `MAX_RETRIES` already guards — a stall costs a run that stopped
+early, this costs one that ran to the end.
+
+The sweep names the workflows in the group explicitly when it asks whether anything is running,
+because the API does not report which concurrency group a run holds. `Agent · fix` is absent from
+that list on purpose: a reusable workflow has no runs of its own, and its caller's name is what
+appears. **If you add a stage to the group, add it to that list** — getting it wrong is wasteful
+rather than dangerous, since a missed name starts a run that then queues behind the one already
+going.
 
 ## Traps
 
@@ -256,9 +313,11 @@ in production.
 ## What it costs
 
 A planned-and-implemented issue is roughly two Claude runs plus one per fix round, and the
-review stage is two more per push — one inline pass, one verdict. The concurrency cap exists
-because of this: three open agent pull requests is already more diff than one person reviews in
-an evening.
+review stage is two more per push — one inline pass, one verdict. Two separate limits exist
+because of this, and they are not the same limit: `MAX_OPEN_AGENT_PRS` caps work *in flight* at
+three, because three open agent pull requests is already more diff than one person reviews in an
+evening, and the `agent-pipeline` concurrency group caps work *in progress* at one, because a
+subscription window split three ways finishes nothing.
 
 ## Licence
 
