@@ -46,6 +46,13 @@ Two consequences are not obvious:
   inside its caller's run, and the caller already holds the slot — asking for it again from a job
   inside that run deadlocks against its own parent until the run times out. `agent-fix-ci.yml`
   therefore declares the group at *workflow* level, not on the job that calls the fix stage.
+- **A run whose jobs all skip still queues for the group.** `agent-fix-ci.yml` holds the group
+  from its first job — it has to, since the stage it calls is a reusable workflow — and
+  `workflow_run` fires it for every CI run, including the one per push to the default branch.
+  Each queued, took the single pending slot, then skipped in seconds; long enough to displace a
+  pending `Agent · review`, whose check would then never report. It filters on
+  `branches: ['agent/issue-*']` at the trigger so no run is created. A `workflow_run` trigger
+  cannot filter on conclusion, so a *green* CI run on an agent branch still arrives and skips.
 - **GitHub's queue depth for a group is one.** A group holds one run in flight and exactly one
   pending; a third arrival cancels the pending one, before its first step, so nothing it would
   have written gets written. Filing issues a few minutes apart avoids it. When it happens, the
