@@ -53,6 +53,12 @@ Two consequences are not obvious:
   pending `Agent · review`, whose check would then never report. It filters on
   `branches: ['agent/issue-*']` at the trigger so no run is created. A `workflow_run` trigger
   cannot filter on conclusion, so a *green* CI run on an agent branch still arrives and skips.
+
+  If you add a Claude workflow of your own to this group, put `concurrency:` on the **job**
+  rather than at workflow level unless the workflow calls a reusable one. A job skipped by its
+  `if:` never asks for the group at all, which is the filter you want and the one a `pull_request`
+  trigger cannot give you: its `branches:` matches the *base* branch, and every agent pull request
+  targets the default branch. A run that ends `cancelled` where you expected `skipped` is this.
 - **GitHub's queue depth for a group is one.** A group holds one run in flight and exactly one
   pending; a third arrival cancels the pending one, before its first step, so nothing it would
   have written gets written. Filing issues a few minutes apart avoids it. When it happens, the

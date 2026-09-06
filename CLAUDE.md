@@ -24,11 +24,16 @@ builds — so the workflows here describe how agents work rather than being run 
   has no path back into the pipeline, and that is how work goes missing here.
 - **Trust is write access, checked through the collaborator API**, never a login in a workflow
   file. Both the approval gate and the plan-provenance check use the same predicate.
-- **One agent runs at a time**, through a shared `agent-pipeline` concurrency group. Two things
+- **One agent runs at a time**, through a shared `agent-pipeline` concurrency group. Three things
   about it are easy to break: `agent-fix.yml` must stay out of the group, because a reusable
-  workflow asking for the group its own caller holds deadlocks; and the workflow-name list in
+  workflow asking for the group its own caller holds deadlocks; the workflow-name list in
   `agent-retry.yml`'s second sweep has to name every stage that *is* in the group, since the API
-  will not report which group a run holds.
+  will not report which group a run holds; and the group belongs on the **job** unless the
+  workflow calls a reusable one, because a run joins a workflow-level group before any job `if:`
+  is evaluated and so takes the single pending slot even when it has nothing to do.
+- **The review runs its verdict pass before its inline pass.** The verdict is what fails the run,
+  and a stalled verdict discards whatever the inline pass had already spent. Reordering them back
+  costs the window seven minutes per stall rather than ten seconds.
 
 ## Style
 
