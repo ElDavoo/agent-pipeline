@@ -109,6 +109,12 @@ jobs:
       contents: read
       id-token: write
       issues: write
+      # The capacity step below calls `gh pr list`, which GitHub serves over GraphQL for the
+      # --json fields it asks for. Without this scope that call fails with "Resource not
+      # accessible by integration (repository.pullRequests)" -- found by a downstream copy
+      # actually filing issues, not by review. Every plan run hits it, not just some, since the
+      # capacity check runs before the issue's own content is ever read.
+      pull-requests: read
     needs: [triage, gate]
     # `always()` is load-bearing and not decoration: without it a *skipped* gate skips this job
     # too, and skipped is exactly the path a maintainer's own issues take. A rejected deployment
