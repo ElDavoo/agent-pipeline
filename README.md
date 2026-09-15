@@ -61,9 +61,10 @@ Two consequences are not obvious:
   targets the default branch. A run that ends `cancelled` where you expected `skipped` is this.
 - **GitHub's queue depth for a group is one.** A group holds one run in flight and exactly one
   pending; a third arrival cancels the pending one, before its first step, so nothing it would
-  have written gets written. Filing issues a few minutes apart avoids it. When it happens, both
-  stages are recovered by `agent-retry.yml`. An implement run leaves `agent:planned` with no pull
-  request, which the second sweep restarts. A plan run leaves `agent:queued` with nothing after
+  have written gets written. Filing issues a few minutes apart avoids it. When it happens,
+  `agent-retry.yml` recovers the stage from the trace it leaves. A review leaves an open agent pull
+  request with no review of its head commit, which is restarted by closing and reopening it. An
+  implement run leaves `agent:planned` with no pull request, which the second sweep restarts. A plan run leaves `agent:queued` with nothing after
   it: the plan stage takes the group on its plan job only, so triage runs first, outside the
   group, and applies that label before the job that can be displaced asks for its turn. The third
   sweep dispatches the plan stage for it.
@@ -253,7 +254,7 @@ event they listen for.
 |---|---|---|
 | plan | `gh workflow run agent-plan.yml -f issue=N` | Refused for an issue that is closed or already carries `agent:planned`, `agent:working`, `agent:stalled`, `agent:stuck`, `agent:stop` or `no-agent`. Also how to plan an issue filed before the pipeline was installed |
 | implement | `gh workflow run agent-implement.yml -f issue=N -f author=…` | Resets the branch and force-pushes |
-| review | Close and reopen the pull request | Not a re-run: a re-run replays the workflow file as it was, so it cannot pick up a fix to that file |
+| review | Close and reopen the pull request, then re-arm auto-merge (`gh pr merge --auto --squash N`) | Not a re-run: a re-run replays the workflow file as it was, so it cannot pick up a fix to that file. Closing disarms auto-merge. The retry sweep does all of this itself for a review that never got its turn |
 | CI | Re-run failed jobs, or push | A push counts as a fix round; a re-run does not |
 | fix | Cannot be started directly | Reusable workflow, no trigger of its own |
 | retry sweep | `gh workflow run agent-retry.yml` | Runs itself every 5 hours. Also drains the queue — see below — so this is how you start an issue whose turn never came |
@@ -294,8 +295,21 @@ it again on every sweep. Unbounded that is a complete agent run spent every five
 which is worse than the case `MAX_RETRIES` already guards — a stall costs a run that stopped
 early, this costs one that ran to the end.
 
-The plan stage gets the same treatment one step earlier, in a third sweep that runs only when the
-second started nothing — finishing planned work comes before starting new work. Its signature is
+A displaced review has its own sweep, which runs first of the three, because it is closest to a
+merge. Its signature is an open, non-draft agent pull request, not labelled `agent:stop`,
+`agent:stuck` or `agent:stalled`, that has no review by `github-actions[bot]` on its head commit.
+While the group is idle nothing else leaves that shape: every push to the head triggers a review,
+and a review that stalls is labelled. The sweep closes and reopens the pull request with the PAT,
+because the review stage has no dispatch trigger and a re-run would replay the old workflow file.
+Closing disarms auto-merge, so the sweep re-arms it straight after; nothing merges before the
+restarted review approves. Only reviews by the bot count, since anyone can review a public pull
+request. It is bounded at three restarts per head commit, counted by `<!-- agent-review-queued
+sha=… -->` markers, and past that the pull request is labelled `agent:stuck` and drafted. The
+bound is per commit rather than per pull request because a long fix loop can legitimately need a
+restart on more than one of its commits.
+
+The plan stage gets the same treatment one step earlier, in a sweep that runs only when neither
+of the others started anything — finishing planned work comes before starting new work. Its signature is
 an open issue labelled `agent:queued` with none of the labels a plan that got further would have
 added. Triage applies that label for an author with write access, and the gate applies it once an
 outside issue is approved, so an issue nobody approved is never restarted. The sweep dispatches

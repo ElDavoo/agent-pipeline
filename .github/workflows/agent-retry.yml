@@ -24,11 +24,12 @@ name: Agent · retry
 # find. This one recognises the shape such a run leaves behind instead, and is what turns the
 # group from a serial drop into a serial queue.
 #
-# The third sweep is the same idea one stage earlier. A displaced plan used to leave nothing
-# behind at all; agent-plan.yml's triage now labels the issue `agent:queued` before the plan job
-# asks for the group, so an open issue still carrying that label and nothing after it is a plan
-# whose turn never came, and this dispatches agent-plan.yml for it. Finishing planned work comes
-# before starting new work, so the third sweep only runs when the second started nothing.
+# The same idea covers the other stages a displacement can drop, each by the trace it leaves:
+# a pull request with no review of its head commit, and an issue labelled `agent:queued` whose
+# plan never ran. They run nearest-to-merge first -- review, then implement, then plan -- and at
+# most one of them starts anything per sweep: each records PIPELINE_STARTED in the job
+# environment, and every later one checks it. That is an env var rather than chained step ids so
+# a repository can add a queue step of its own without threading its id through all the others.
 
 on:
   schedule:
@@ -205,6 +206,78 @@ jobs:
             echo "idle=true" >> "$GITHUB_OUTPUT"
           fi
 
+      # A review displaced out of the group. agent-review.yml declares the group at workflow level
+      # (it calls the reusable fix stage, see README.md), so a cancelled review leaves no job and no
+      # marker -- only an open agent pull request with no review by the bot on its head commit.
+      # Nothing else produces that shape while the group is idle: every push that moves the head
+      # triggers a review, and a stalled one carries `agent:stalled`, which is the first sweep's.
+      #
+      # Restarted by closing and reopening the pull request, the handle README.md documents. It is
+      # the only one that works: the stage has no dispatch trigger, and re-running the cancelled
+      # run would replay the workflow file as it was. Closing disarms auto-merge, so it is
+      # re-armed straight after -- safe, since nothing merges before the review this starts has
+      # approved.
+      #
+      # Bounded per head commit rather than per pull request: a long fix loop can legitimately
+      # need more than three restarts across its commits, but three on the same commit is a
+      # review that fails before recording anything, every time.
+      - name: Review the next pull request whose review never came
+        if: steps.idle.outputs.idle == 'true' && env.PIPELINE_STARTED != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          # The PAT: a close and reopen by GITHUB_TOKEN triggers no workflow, so the review would
+          # never start. The same trap as the dispatches below.
+          DISPATCH_TOKEN: ${{ secrets.AGENT_PUSH_TOKEN }}
+          MAX_RETRIES: '3'
+        run: |
+          set -euo pipefail
+
+          prs=$(gh pr list --state open --limit 100 --json number,headRefName,headRefOid,isDraft,labels --jq '
+                  [ .[] | select(.headRefName | startswith("agent/issue-"))
+                        | select(.isDraft | not)
+                        | select([.labels[].name] | any(IN("agent:stop","agent:stuck","agent:stalled")) | not) ]
+                  | sort_by(.number) | .[] | "\(.number) \(.headRefOid)"')
+          if [ -z "$prs" ]; then
+            echo "no agent pull request waiting"
+            exit 0
+          fi
+
+          while read -r pr sha <&3; do
+            # Bot-authored only, for the same reason as the markers above: anyone can review a
+            # public pull request, and a stranger's review must not make this one look done.
+            reviewed=$(gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/pulls/${pr}/reviews" \
+              | jq --arg sha "$sha" '[.[] | .[] | select(.user.login == "github-actions[bot]"
+                                                         and .user.type == "Bot"
+                                                         and .commit_id == $sha)] | length')
+            if [ "$reviewed" -gt 0 ]; then
+              continue
+            fi
+
+            started=$(gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/issues/${pr}/comments" \
+              | jq --arg m "<!-- agent-review-queued sha=${sha} -->" \
+                   '[.[] | .[] | select(.user.login == "github-actions[bot]" and .user.type == "Bot")
+                              | .body | select(contains($m))] | length')
+            if [ "$started" -ge "$MAX_RETRIES" ]; then
+              echo "PR #$pr: review restarted $started times on ${sha:0:7} — giving up"
+              gh pr comment "$pr" --body "The review of this pull request has been restarted $started times on the same commit and has never recorded a verdict, so it is being handed over rather than restarted again. Remove the \`agent:stuck\` label and mark it ready for review to let the pipeline pick it up."
+              gh pr edit "$pr" --add-label 'agent:stuck'
+              gh pr ready --undo "$pr" || true
+              continue
+            fi
+
+            echo "pipeline idle — restarting the review of PR #$pr at ${sha:0:7}"
+            gh pr comment "$pr" --body "Restarting the review — the pipeline runs one agent at a time and this pull request's review never got its turn. <!-- agent-review-queued sha=${sha} -->"
+            GH_TOKEN="$DISPATCH_TOKEN" gh pr close "$pr"
+            GH_TOKEN="$DISPATCH_TOKEN" gh pr reopen "$pr"
+            GH_TOKEN="$DISPATCH_TOKEN" gh pr merge --auto --squash "$pr" \
+              || echo "::warning::could not re-arm auto-merge on PR #$pr"
+            echo "PIPELINE_STARTED=true" >> "$GITHUB_ENV"
+            exit 0
+          done 3<<<"$prs"
+
+          echo "every agent pull request has a review of its head commit"
+
       # The queue draining. An issue displaced out of the concurrency group leaves no marker, so
       # this looks for its signature instead: the implement stage swaps `agent:planned` for
       # `agent:working` only once its pull request exists, so an open issue still labelled
@@ -220,8 +293,7 @@ jobs:
       # thing this exists to serve, and the same five-hour cadence that suits a usage window
       # suits a queue whose items take the better part of an hour.
       - name: Start the next issue whose turn never came
-        id: implement
-        if: steps.idle.outputs.idle == 'true'
+        if: steps.idle.outputs.idle == 'true' && env.PIPELINE_STARTED != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
@@ -288,7 +360,7 @@ jobs:
           gh issue comment "$waiting" --body "Starting this now — the pipeline runs one agent at a time and this one's turn had not come. <!-- agent-queued -->"
           GH_TOKEN="$DISPATCH_TOKEN" gh workflow run agent-implement.yml \
             -f issue="$waiting" -f author="$author"
-          echo "dispatched=true" >> "$GITHUB_OUTPUT"
+          echo "PIPELINE_STARTED=true" >> "$GITHUB_ENV"
 
       # The same drain for the plan stage. Its signature is `agent:queued` -- put there by
       # agent-plan.yml's triage, for an issue it cleared to run -- with none of the labels a plan
@@ -299,7 +371,7 @@ jobs:
       # triage re-reads the issue and refuses one that is closed or already past planning, so a
       # dispatch that races a plan finishing is a skipped run rather than a plan of the plan.
       - name: Plan the next issue whose turn never came
-        if: steps.idle.outputs.idle == 'true' && steps.implement.outputs.dispatched != 'true'
+        if: steps.idle.outputs.idle == 'true' && env.PIPELINE_STARTED != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
@@ -349,3 +421,4 @@ jobs:
           echo "pipeline idle — planning issue $waiting"
           gh issue comment "$waiting" --body "Planning this now — the pipeline runs one agent at a time and this one's plan never got its turn. <!-- agent-plan-queued -->"
           GH_TOKEN="$DISPATCH_TOKEN" gh workflow run agent-plan.yml -f issue="$waiting"
+          echo "PIPELINE_STARTED=true" >> "$GITHUB_ENV"
