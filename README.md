@@ -210,6 +210,7 @@ Everything below is a deliberate default, not a constant. All of it is in the wo
 | Turn budget | every `claude_args` | implement 300, fix 240, escalation 400 |
 | Job timeout | every stage | 120 minutes, except plan at 20 and review at 30 |
 | What the plan stage plans around | `agent-plan.yml` prompt | workflow files, plus whatever you add under its CUSTOMISE note — declared out of scope, never a reason to refuse the issue |
+| What the merge gate blocks on beyond CLAUDE.md | `agent-review.yml` Verdict prompt, CUSTOMISE | correctness bugs, weakened gates, unmigrated schema/interface changes, unimplemented or overreaching work, missing tests |
 | Follow-up issues per merge | `agent-followups.yml`, `maxItems` in its schema | 0 to 5 |
 | Where the follow-up stage reads the project's goals | `agent-followups.yml` prompt, CUSTOMISE | `CLAUDE.md` and any file it names, plus `README.md` |
 | Labels a follow-up issue may carry | `agent-followups.yml`, the `enum` in its schema | `bug`, `enhancement`, `documentation` — each must exist in your repository |

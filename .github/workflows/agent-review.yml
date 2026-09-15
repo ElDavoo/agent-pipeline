@@ -13,6 +13,12 @@ name: Agent · review
 # There is no human downstream of this stage. The prompt says so, deliberately: a reviewer that
 # believes someone will catch its misses drifts one way, and one that believes it is the last
 # gate drifts the other, and the second drift is the one this pipeline can afford.
+#
+# CUSTOMISE: the "Block on" list in the Verdict prompt below is deliberately generic -- it names
+# CLAUDE.md as the source of this project's invariants rather than naming any invariant itself.
+# Add this repository's own non-negotiables as bullets in that list, worded the same way (a
+# condition to block on, not a style preference), if CLAUDE.md alone does not make them concrete
+# enough for a reviewer with no other context.
 
 on:
   pull_request:
@@ -100,16 +106,20 @@ jobs:
             catch a change breaking, and it is the standard you are holding this to.
 
             Block on, and only on:
-            - a correctness bug, including a broken invariant CLAUDE.md names (SessionRepository's
-              idempotence and its no-counting-across-a-boot rule; the widget composed-tree shape;
-              device-identity keying on the last two octets; day bucketing by ZoneId);
-            - a gate weakened rather than satisfied — a lowered coverage floor, a new lint.xml
-              suppression, a lint baseline, a deleted or defanged assertion;
-            - a user-visible string added to `values/` but not to every translated locale;
-            - a schema change without a migration;
+            - a correctness bug, including a broken invariant CLAUDE.md names;
+            - a gate weakened rather than satisfied — a lowered coverage floor, a new lint
+              suppression, a widened baseline, a deleted or defanged assertion;
+            - a schema or interface change without the migration or compatibility path the
+              project requires;
             - work that does not actually implement the issue, or that quietly does more than
               the issue asked;
             - a missing test for behaviour the repository would normally pin.
+
+            CUSTOMISE: this list is generic on purpose. If this repository has invariants a
+            reviewer needs spelled out beyond what CLAUDE.md already says — a resource that must
+            stay in sync across files, a keying or bucketing rule, a pattern that is a security
+            issue here specifically — add them as bullets above, phrased the same way: a thing
+            to block on, not a style preference.
 
             Do not block on style, naming, or preference. A second pass runs after you and leaves
             those inline on the pull request; they are not yours to raise here. A change that is
