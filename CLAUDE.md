@@ -27,10 +27,17 @@ builds — so the workflows here describe how agents work rather than being run 
 - **One agent runs at a time**, through a shared `agent-pipeline` concurrency group. Three things
   about it are easy to break: `agent-fix.yml` must stay out of the group, because a reusable
   workflow asking for the group its own caller holds deadlocks; the workflow-name list in
-  `agent-retry.yml`'s second sweep has to name every stage that *is* in the group, since the API
+  `agent-retry.yml`'s idle check has to name every stage that *is* in the group, since the API
   will not report which group a run holds; and the group belongs on the **job** unless the
   workflow calls a reusable one, because a run joins a workflow-level group before any job `if:`
   is evaluated and so takes the single pending slot even when it has nothing to do.
+- **Every stage in the group leaves a trace a displacement cannot erase**, because a run cancelled
+  out of the queue never reaches its first step. The implement stage's is `agent:planned` with no
+  pull request; the plan stage's is `agent:queued`, applied by triage outside the group; the
+  review's is an agent pull request with no bot review on its head commit; the follow-up stage's
+  is its run history or its queued/done markers. `agent-retry.yml` restarts each from that trace.
+  A new stage in the group needs one too, written before the job that asks for the group, or its
+  runs can be lost without anything noticing.
 - **The review runs its verdict pass before its inline pass.** The verdict is what fails the run,
   and a stalled verdict discards whatever the inline pass had already spent. Reordering them back
   costs the window seven minutes per stall rather than ten seconds.

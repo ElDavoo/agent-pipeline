@@ -25,10 +25,10 @@ name: Agent · retry
 # group from a serial drop into a serial queue.
 #
 # The same idea covers the other stages a displacement can drop, each by the trace it leaves:
-# a pull request with no review of its head commit, and an issue labelled `agent:queued` whose
-# plan never ran. They run nearest-to-merge first -- review, then implement, then plan -- and at
-# most one of them starts anything per sweep: each records PIPELINE_STARTED in the job
-# environment, and every later one checks it. That is an env var rather than chained step ids so
+# a pull request with no review of its head commit, an issue labelled `agent:queued` whose
+# plan never ran, and a merge whose follow-up pass never ran. They run nearest-to-merge first --
+# review, then implement, then follow-ups, then plan -- and at most one of them starts anything
+# per sweep: each records PIPELINE_STARTED in the job environment, and every later one checks it. That is an env var rather than chained step ids so
 # a repository can add a queue step of its own without threading its id through all the others.
 
 on:
@@ -197,7 +197,7 @@ jobs:
             [ .[] | select(.status != "completed")
                   | select(.workflowName as $w
                            | ["Agent · plan","Agent · implement","Agent · review",
-                              "Agent · fix CI"]
+                              "Agent · fix CI","Agent · followups"]
                            | index($w)) ] | length')
           if [ "$busy" -gt 0 ]; then
             echo "$busy pipeline run(s) still in flight — the queue is not idle, leaving it"
@@ -361,6 +361,75 @@ jobs:
           GH_TOKEN="$DISPATCH_TOKEN" gh workflow run agent-implement.yml \
             -f issue="$waiting" -f author="$author"
           echo "PIPELINE_STARTED=true" >> "$GITHUB_ENV"
+
+      # The follow-up stage can be displaced like any other. Its trace is a recent merge with neither a finished
+      # event run of that workflow on the pull request's head commit nor a finished dispatched one
+      # (recognised by its markers -- see the top of agent-followups.yml). Placed after implement and before plan: it only proposes
+      # new issues, so it matters less than finishing the work already in flight, but a plan
+      # would draw from the issues it opens.
+      #
+      # A week back and no further. Older merges are not worth a run each, and a bound in time is
+      # what stops a change to this signature from re-proposing follow-ups for the whole history.
+      # Bounded at three starts per pull request; past that it logs and moves on rather than
+      # labelling anything, since nothing downstream waits on this stage.
+      - name: Propose follow-ups for the next merge whose turn never came
+        if: steps.idle.outputs.idle == 'true' && env.PIPELINE_STARTED != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          DISPATCH_TOKEN: ${{ secrets.AGENT_PUSH_TOKEN }}
+          MAX_RETRIES: '3'
+          LOOKBACK_DAYS: '7'
+        run: |
+          set -euo pipefail
+
+          # The stage is optional -- see the top of agent-followups.yml -- so a copy without it
+          # skips this sweep rather than failing on a workflow that is not there.
+          if ! gh workflow view agent-followups.yml >/dev/null 2>&1; then
+            echo "no follow-up stage in this repository"
+            exit 0
+          fi
+
+          since=$(date -u -d "-${LOOKBACK_DAYS} days" +%Y-%m-%dT%H:%M:%SZ)
+          merged=$(gh pr list --state merged --limit 50 --json number,headRefOid,mergedAt \
+                     | jq -r --arg since "$since" '[ .[] | select(.mergedAt >= $since) ]
+                                                   | sort_by(.mergedAt) | .[] | "\(.number) \(.headRefOid)"')
+          if [ -z "$merged" ]; then
+            echo "no merge in the last $LOOKBACK_DAYS days"
+            exit 0
+          fi
+
+          done_shas=$(gh run list --workflow agent-followups.yml --event pull_request --limit 200 \
+                        --json headSha,conclusion --jq '.[] | select(.conclusion == "success") | .headSha')
+
+          while read -r pr sha <&3; do
+            bodies=$(gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/issues/${pr}/comments" \
+                       | jq -c '[.[] | .[] | select(.user.login == "github-actions[bot]" and .user.type == "Bot") | .body]')
+            # The last of the two markers decides, when there is one: `done` last means the latest
+            # pass finished, `queued` last means a dispatched pass never did. With neither, no pass
+            # was ever dispatched, and run history on the head commit is the only record.
+            last=$(jq -r '[.[] | (if contains("<!-- agent-followups-done -->") then "done"
+                                  elif contains("<!-- agent-followups-queued -->") then "queued"
+                                  else empty end)] | last // "none"' <<<"$bodies")
+            case "$last" in
+              done) continue ;;
+              none) if grep -qxF "$sha" <<<"$done_shas"; then continue; fi ;;
+            esac
+            started=$(jq '[.[] | select(contains("<!-- agent-followups-queued -->"))] | length' <<<"$bodies")
+            if [ "$started" -ge "$MAX_RETRIES" ]; then
+              echo "PR #$pr: follow-ups started $started times already — skipping it"
+              continue
+            fi
+
+            # No comment here: the dispatched run's own `queue` job posts the queued marker, so a
+            # start is counted once whether this sweep or a human dispatched it.
+            echo "pipeline idle — proposing follow-ups for PR #$pr"
+            GH_TOKEN="$DISPATCH_TOKEN" gh workflow run agent-followups.yml -f pr="$pr"
+            echo "PIPELINE_STARTED=true" >> "$GITHUB_ENV"
+            exit 0
+          done 3<<<"$merged"
+
+          echo "every recent merge has had its follow-up pass"
 
       # The same drain for the plan stage. Its signature is `agent:queued` -- put there by
       # agent-plan.yml's triage, for an issue it cleared to run -- with none of the labels a plan

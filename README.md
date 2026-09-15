@@ -27,7 +27,19 @@ issue opened
      +----------> Agent · fix <--+           up to 10 rounds, 9 is an escalation
      |
    squash merge
+     |
+  Agent · followups     reads the merge against the project's goals, opens the next issues
+     |
+   (back to the top)
 ```
+
+**The queue refills itself.** After every merge, `Agent · followups` reads the diff, the pull
+request and the open issues against the goals your `CLAUDE.md` describes, and opens zero to five
+follow-up issues: the narrower question an answer raised, the part a plan left out of scope. They
+are opened with the PAT, so they are trusted and planned like a maintainer's own. For a project
+whose goal outlasts any one issue, that is the difference between a pipeline that stops when the
+tracker empties and one that keeps working toward the goal. It is optional: delete
+`agent-followups.yml` if people file your backlog, and nothing else notices.
 
 **One agent runs at a time.** Every stage above names the same concurrency group,
 `agent-pipeline`, and none of them cancels in progress — so plan, implement, review and fix queue
@@ -198,12 +210,17 @@ Everything below is a deliberate default, not a constant. All of it is in the wo
 | Turn budget | every `claude_args` | implement 300, fix 240, escalation 400 |
 | Job timeout | every stage | 120 minutes, except plan at 20 and review at 30 |
 | What the plan stage plans around | `agent-plan.yml` prompt | workflow files, plus whatever you add under its CUSTOMISE note — declared out of scope, never a reason to refuse the issue |
+| Follow-up issues per merge | `agent-followups.yml`, `maxItems` in its schema | 0 to 5 |
+| Where the follow-up stage reads the project's goals | `agent-followups.yml` prompt, CUSTOMISE | `CLAUDE.md` and any file it names, plus `README.md` |
+| Labels a follow-up issue may carry | `agent-followups.yml`, the `enum` in its schema | `bug`, `enhancement`, `documentation` — each must exist in your repository |
 | House rules for the implementer | `agent-implement.yml` prompt | tests with the change; comments explain why; match the surrounding code |
 | Model and effort | every `claude_args` | `--model opus --effort medium` everywhere |
 
 **Write a `CLAUDE.md`.** Every stage is told to read it and treats it as authoritative. It is
 where the invariants that lint and tests will not catch belong — the reasoning a reviewer needs
-and a diff does not show. A repository without one gets a pipeline running on generic
+and a diff does not show. Put the project's goal in it too, not only in a file it links: the
+follow-up stage decides what to open next by measuring each merge against that goal, and every
+other stage does better work knowing what the issue is for. A repository without one gets a pipeline running on generic
 instincts; the quality difference is larger than any prompt tuning here.
 
 ## Who is trusted
@@ -247,7 +264,7 @@ added a second later loses the race. That is what the issue template is for, and
 
 ## Restarting a stage
 
-Only two of these can be dispatched by hand. For the rest, restarting means re-triggering the
+Three of these can be dispatched by hand. For the rest, restarting means re-triggering the
 event they listen for.
 
 | Stage | How | Caveat |
@@ -255,6 +272,7 @@ event they listen for.
 | plan | `gh workflow run agent-plan.yml -f issue=N` | Refused for an issue that is closed or already carries `agent:planned`, `agent:working`, `agent:stalled`, `agent:stuck`, `agent:stop` or `no-agent`. Also how to plan an issue filed before the pipeline was installed |
 | implement | `gh workflow run agent-implement.yml -f issue=N -f author=…` | Resets the branch and force-pushes |
 | review | Close and reopen the pull request, then re-arm auto-merge (`gh pr merge --auto --squash N`) | Not a re-run: a re-run replays the workflow file as it was, so it cannot pick up a fix to that file. Closing disarms auto-merge. The retry sweep does all of this itself for a review that never got its turn |
+| followups | `gh workflow run agent-followups.yml -f pr=N` | Merged pull requests only. Also how to get follow-ups for a merge from before the stage was installed |
 | CI | Re-run failed jobs, or push | A push counts as a fix round; a re-run does not |
 | fix | Cannot be started directly | Reusable workflow, no trigger of its own |
 | retry sweep | `gh workflow run agent-retry.yml` | Runs itself every 5 hours. Also drains the queue — see below — so this is how you start an issue whose turn never came |
@@ -308,8 +326,22 @@ sha=… -->` markers, and past that the pull request is labelled `agent:stuck` a
 bound is per commit rather than per pull request because a long fix loop can legitimately need a
 restart on more than one of its commits.
 
-The plan stage gets the same treatment one step earlier, in a sweep that runs only when neither
-of the others started anything — finishing planned work comes before starting new work. Its signature is
+The follow-up stage has a sweep too, run after the implement sweep and before the plan sweep: it
+only proposes new work, so it matters less than finishing what is in flight, but the plan sweep
+would draw from what it opens. Its signature is a pull request merged in the last seven days with
+no finished pass. An event run is recognised in run history, by a successful run of
+`agent-followups.yml` on the pull request's head commit. A dispatched run cannot be, since its head
+commit is the default branch's, so it leaves two bot-authored markers on the pull request instead:
+`<!-- agent-followups-queued -->` from a small job outside the group, before the pass asks for its
+turn, and `<!-- agent-followups-done -->` from the pass's last step, in a comment listing what it
+opened. The last of the two decides. The sweep dispatches the stage for the oldest such merge,
+at most three times per pull request, and past that moves on without labelling anything, since
+nothing waits on this stage. The seven-day window is what stops a change to the signature from
+re-running the whole history.
+
+The plan stage gets the same treatment one step earlier, in the last sweep, which runs only when
+none of the others started anything — finishing planned work comes before starting new work. Its
+signature is
 an open issue labelled `agent:queued` with none of the labels a plan that got further would have
 added. Triage applies that label for an author with write access, and the gate applies it once an
 outside issue is approved, so an issue nobody approved is never restarted. The sweep dispatches
