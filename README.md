@@ -335,7 +335,8 @@ no finished pass. An event run is recognised in run history, by a successful run
 commit is the default branch's, so it leaves two bot-authored markers on the pull request instead:
 `<!-- agent-followups-queued -->` from a small job outside the group, before the pass asks for its
 turn, and `<!-- agent-followups-done -->` from the pass's last step, in a comment listing what it
-opened. The last of the two decides. The sweep dispatches the stage for the oldest such merge,
+opened. The last of the two decides. A pass whose agent run did not finish posts no done marker
+and fails its job, so it counts as not finished by either record. The sweep dispatches the stage for the oldest such merge,
 at most three times per pull request, and past that moves on without labelling anything, since
 nothing waits on this stage. The seven-day window is what stops a change to the signature from
 re-running the whole history.

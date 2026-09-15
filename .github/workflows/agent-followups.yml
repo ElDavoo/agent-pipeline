@@ -12,8 +12,9 @@ name: Agent · followups
 #
 # Deliberately simpler than the plan/implement/review/fix chain: this stage is supplementary,
 # not critical path. If the agent run fails, the existing backlog is still there, so it skips
-# agent-stall entirely (continue-on-error and a clean exit on failure) rather than carrying that
-# machinery for a stage nothing else depends on. It is named in agent-retry.yml's "is the group
+# agent-stall and its labels entirely rather than carrying that machinery for a stage nothing else
+# depends on. A pass that did not finish fails its job and leaves no done marker, and
+# agent-retry.yml's follow-up sweep retries it a bounded number of times. It is named in agent-retry.yml's "is the group
 # busy" check, since it shares the token budget the group protects.
 #
 # Uses AGENT_PUSH_TOKEN, not GITHUB_TOKEN, for the one step that actually creates issues. Two
@@ -89,6 +90,9 @@ jobs:
       # the PAT, not this token.
       pull-requests: write
       issues: read
+      # claude-code-action exchanges an OIDC token for its GitHub App token, and fails before the
+      # model starts without it -- every run of this stage did, until this line was added.
+      id-token: write
 
     steps:
       # A dispatch carries only a number, so the merge commit is looked up; an event run already
@@ -210,12 +214,6 @@ jobs:
             --disallowedTools "Write,Edit,Bash(gh:*),Bash(curl:*),Bash(wget:*),Bash(nc:*),Bash(ssh:*),Bash(scp:*),Bash(git push:*),Bash(git remote:*),Bash(git config:*),WebFetch,WebSearch"
             --json-schema '{"type":"object","properties":{"issues":{"type":"array","maxItems":5,"items":{"type":"object","properties":{"title":{"type":"string"},"body":{"type":"string"},"labels":{"type":"array","items":{"type":"string","enum":["bug","enhancement","documentation"]}}},"required":["title","body","labels"]}}},"required":["issues"]}'
 
-      - name: Stop quietly if the run did not finish
-        if: steps.propose.outcome != 'success' || steps.propose.outputs.conclusion != 'success'
-        run: |
-          echo "::notice::followups stage did not complete -- no issues opened this run, nothing else depends on it"
-          exit 0
-
       # Same reasoning as agent-plan.yml's "unpack the plan" step: plain string outputs rather
       # than fromJSON() in an `if:`, so a stalled run's empty output skips cleanly instead of
       # failing template evaluation.
@@ -263,9 +261,11 @@ jobs:
             echo "- $url" >> /tmp/opened.txt
           done
 
-      # The trace agent-retry.yml looks for, on both paths -- including the quiet stop above,
-      # since a pass that ran and failed is not retried (see the top of this file). Posted with
-      # GITHUB_TOKEN, so it is github-actions[bot]'s, which is the authorship the sweep filters on.
+      # The trace agent-retry.yml looks for. Only a pass that finished gets the done marker. One that
+      # did not still says so on the pull request, then fails the job: that keeps an event run out
+      # of the sweep's "successful run on the head commit" check and leaves a dispatched run's
+      # queued marker last, so the sweep retries it, up to its bound. Posted with GITHUB_TOKEN, so
+      # it is github-actions[bot]'s, which is the authorship the sweep filters on.
       - name: Record that follow-ups ran
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -277,13 +277,17 @@ jobs:
           set -euo pipefail
           {
             if [ "$OUTCOME" != true ]; then
-              printf 'The [follow-up pass](%s) for this merge did not finish; no issues were opened.\n' "$RUN_URL"
+              printf 'The [follow-up pass](%s) for this merge did not finish; no issues were opened. The retry sweep will try it again.\n' "$RUN_URL"
             elif [ -s /tmp/opened.txt ]; then
               printf 'The [follow-up pass](%s) for this merge opened:\n\n' "$RUN_URL"
               cat /tmp/opened.txt
             else
               printf 'The [follow-up pass](%s) for this merge found nothing new to open.\n' "$RUN_URL"
             fi
-            printf '\n<!-- agent-followups-done -->\n'
+            if [ "$OUTCOME" = true ]; then printf '\n<!-- agent-followups-done -->\n'; fi
           } > /tmp/done.md
           gh pr comment "$PR" --body-file /tmp/done.md
+          if [ "$OUTCOME" != true ]; then
+            echo "::error::the follow-up pass did not finish"
+            exit 1
+          fi
