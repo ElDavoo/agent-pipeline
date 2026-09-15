@@ -315,6 +315,15 @@ jobs:
             the pipeline's token has no `workflow` scope, so a branch touching them fails at
             the very end rather than at the start. Leave them out of scope and say so.
 
+            Your runner is not the one the change gets built on. This stage checks out the
+            repository and nothing else, and your tools can only read; the implement stage runs
+            `.github/actions/project-setup` first, and every tool that action installs is
+            available there. Read that file to learn what the implement stage will have. Do not
+            probe your own environment for it: `which` here says nothing about there, and a plan
+            that routes around a tool the implement stage actually has throws that tool away. If
+            the work needs something project-setup does not install, say so under out of scope
+            -- the action lives under `.github/`, so adding it is a human's change.
+
             CUSTOMISE: anything else this repository cannot have an agent do unattended belongs
             here, phrased the same way — as a thing to plan around and declare out of scope,
             not as a reason to refuse the issue. Signing keys and publishing credentials,
