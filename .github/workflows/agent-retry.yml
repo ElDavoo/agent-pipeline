@@ -39,7 +39,12 @@ name: Agent · retry
 # skips anything that already has a run in flight (the busy list "Is the pipeline idle" writes),
 # so two sweeps in a row do not start the same thing twice.
 
-on:
+# workflow_run is a wake-up here, not an input. The job reads one field of the run that woke it
+# -- whether it was skipped -- and checks out no code, downloads no artifact and interpolates no
+# event field into a script: it re-reads the repository through the API exactly as the hourly
+# tick does. A run that a fork's pull request set off therefore buys an extra sweep and nothing
+# else, and the `agent-retry` group below folds a burst of them into one pending run.
+on:  # zizmor: ignore[dangerous-triggers]
   schedule:
     - cron: '0 * * * *'
   push:
