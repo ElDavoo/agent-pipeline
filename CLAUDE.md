@@ -24,23 +24,37 @@ builds — so the workflows here describe how agents work rather than being run 
   has no path back into the pipeline, and that is how work goes missing here.
 - **Trust is write access, checked through the collaborator API**, never a login in a workflow
   file. Both the approval gate and the plan-provenance check use the same predicate.
-- **One agent runs at a time**, through a shared `agent-pipeline` concurrency group. Three things
-  about it are easy to break: `agent-fix.yml` must stay out of the group, because a reusable
-  workflow asking for the group its own caller holds deadlocks; the workflow-name list in
-  `agent-retry.yml`'s idle check has to name every stage that *is* in the group, since the API
-  will not report which group a run holds; and the group belongs on the **job** unless the
-  workflow calls a reusable one, because a run joins a workflow-level group before any job `if:`
-  is evaluated and so takes the single pending slot even when it has nothing to do.
+- **One concurrency group per issue**, `agent-pipeline/agent/issue-N`, which every stage for
+  that issue names, and a cap on how many run at once that only `agent-retry.yml` enforces. Four
+  things about it are easy to break. First, `agent-fix.yml` must stay out of the group, because a
+  reusable workflow asking for the group its own caller holds deadlocks. Second, the group
+  belongs on the **job** unless the workflow calls a reusable one, because a run joins a
+  workflow-level group before any job `if:` is evaluated and so takes the group's single pending
+  slot even when it has nothing to do. Third, the retry sweep is the only thing that hands out
+  slots, and it can only count what it can name: the workflow-name list in its idle check, and
+  its `workflow_run` trigger, have to name every stage, since the API will not report which group
+  a run holds. Fourth, `agent-conflicts.yml` is dispatched one pull request per run for the same
+  reason. A batch run counts as one busy run however many agents it starts, and a stage that
+  sizes its own batch from the free slots races the sweep for them. `MAX_PARALLEL_AGENTS` and
+  `MAX_OPEN_AGENT_PRS` each have two copies, which must be kept equal.
 - **Every stage in the group leaves a trace a displacement cannot erase**, because a run cancelled
   out of the queue never reaches its first step. The implement stage's is `agent:planned` with no
   pull request; the plan stage's is `agent:queued`, applied by triage outside the group; the
   review's is an agent pull request with no bot review on its head commit; the follow-up stage's
-  is its run history or its queued/done markers. `agent-retry.yml` restarts each from that trace.
+  is its run history or its queued/done markers. A conflicting pull request needs no marker,
+  because GitHub's own mergeable state is the trace. `agent-retry.yml` restarts each from its
+  trace.
   A new stage in the group needs one too, written before the job that asks for the group, or its
   runs can be lost without anything noticing.
-- **The review runs its verdict pass before its inline pass.** The verdict is what fails the run,
-  and a stalled verdict discards whatever the inline pass had already spent. Reordering them back
-  costs the window seven minutes per stall rather than ten seconds.
+- **The review is one pass, and its findings are data.** The verdict schema returns each finding
+  as file, line, problem and fix, and the workflow renders them as the review's markdown body.
+  That body is also the fix stage's whole payload, so a finding the schema cannot express is one
+  the fix stage never sees. A second reviewing pass (the old inline one, posting as `claude[bot]`)
+  doubles the reviews on every pull request. A free-text summary field brings back the
+  one-paragraph blob.
+- **A schedule is a fallback, not a clock.** GitHub drops `schedule:` events under load without
+  saying so, which is why `agent-retry.yml` also runs on `workflow_run` and `push`. Anything that
+  has to happen soon after an event should be triggered by that event.
 
 ## Style
 

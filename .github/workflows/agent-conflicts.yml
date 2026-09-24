@@ -1,0 +1,275 @@
+name: Agent · conflicts
+
+# Resolves merge conflicts between open agent pull requests and main. With several agents
+# running in parallel (see the concurrency note at the top of agent-plan.yml), a merge to main
+# routinely leaves other open agent pull requests conflicting -- and a conflicting pull request
+# gets no CI, no review and no auto-merge, so it just sits.
+#
+# The branch is rebuilt LINEAR on purpose, not with a merge commit: agent-fix.yml ends every
+# round with `git rebase origin/main`, which drops merge commits and would replay the branch's
+# commits into the very conflicts resolved here. So the branch's net change is squash-merged
+# onto current main, Claude resolves that one conflicted tree, and the result is force-pushed as
+# a single commit on top of main. The push re-triggers CI and the review, and the PR's armed
+# auto-merge does the rest. (Side effect: the fix stage's round counter, which counts commits in
+# origin/main..HEAD, restarts at 1 for that branch.)
+#
+# Bounded: at most three attempts per PR head commit, recorded as markers on the PR. After that
+# the PR is labelled agent:stuck and left for a human.
+#
+# Dispatched by agent-retry.yml, one pull request per run (the `pr` input), which is what makes a
+# resolution count as one of MAX_PARALLEL_AGENTS there. It is not triggered by pushes or a
+# schedule of its own on purpose: sizing its own batch from the free slots, a five-PR batch
+# counted as one busy run and raced the retry sweep for the same slots. Dispatched by hand without
+# `pr`, it sweeps every conflicting agent pull request, up to the free slots.
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: 'Pull request to resolve (empty: every conflicting agent PR, up to the free slots)'
+        required: false
+        default: ''
+
+run-name: "${{ inputs.pr && format('Resolve conflicts on PR #{0}', inputs.pr) || 'Agent · conflicts' }}"
+
+permissions: {}
+
+# One run per PR; the resolution below also takes the issue's own pipeline group.
+concurrency:
+  group: agent-conflicts-${{ inputs.pr || 'sweep' }}
+  cancel-in-progress: false
+
+jobs:
+  find:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pull-requests: read
+      actions: read
+    outputs:
+      prs: ${{ steps.find.outputs.prs }}
+      any: ${{ steps.find.outputs.any }}
+    steps:
+      - name: Find conflicting agent pull requests
+        id: find
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          # CUSTOMISE: keep equal to MAX_PARALLEL_AGENTS in agent-retry.yml.
+          MAX_PARALLEL_AGENTS: '5'
+          MAX_ATTEMPTS: '3'
+          PR: ${{ inputs.pr }}
+        run: |
+          set -euo pipefail
+          if [ -n "$PR" ]; then
+            # The retry sweep already counted this run as the PR's slot.
+            candidates=$PR
+            free=1
+          else
+            # shellcheck disable=SC2016  # $w is a jq variable and has to reach jq unexpanded.
+            busy=$(gh run list --limit 200 --json workflowName,status --jq '
+              [ .[] | select(.status != "completed")
+                    | select(.workflowName as $w
+                             | ["Agent · plan","Agent · implement","Agent · review",
+                                "Agent · fix CI","Agent · followups","Agent · conflicts"]
+                             | index($w)) ] | length')
+            # This run is in that list too, and holds no agent slot while it looks.
+            busy=$(( busy - 1 ))
+            free=$(( MAX_PARALLEL_AGENTS - busy ))
+            echo "$busy agent run(s) in flight, $free slot(s) free"
+            candidates=$(gh pr list --state open --limit 100 --json number,headRefName,isDraft,labels --jq '
+              [ .[] | select(.headRefName | startswith("agent/issue-"))
+                    | select(.isDraft | not)
+                    | select([.labels[].name] | any(IN("agent:stop","agent:stuck","no-agent")) | not)
+                    | .number ] | sort | .[]')
+          fi
+
+          found='[]'
+          if [ "$free" -gt 0 ]; then
+            for pr in $candidates; do
+              [ "$(jq length <<<"$found")" -lt "$free" ] || break
+              # GitHub computes mergeability lazily: the first read after main moves is UNKNOWN.
+              state=UNKNOWN
+              for _ in 1 2 3 4 5 6; do
+                state=$(gh pr view "$pr" --json mergeable --jq .mergeable)
+                [ "$state" != UNKNOWN ] && break
+                sleep 10
+              done
+              echo "PR #$pr: $state"
+              [ "$state" = CONFLICTING ] || continue
+              read -r branch head < <(gh pr view "$pr" --json headRefName,headRefOid --jq '"\(.headRefName) \(.headRefOid)"')
+              tries=$(gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/issues/${pr}/comments" \
+                | jq --arg m "<!-- agent-conflicts-attempt sha=${head} -->" \
+                     '[.[] | .[] | select(.user.login == "github-actions[bot]" and .user.type == "Bot")
+                                | .body | select(contains($m))] | length')
+              if [ "$tries" -ge "$MAX_ATTEMPTS" ]; then
+                echo "PR #$pr: $tries attempts on ${head:0:7} already -- leaving for the stuck step"
+                found=$(jq -c --arg pr "$pr" --arg b "$branch" --arg h "$head" \
+                  '. + [{pr: $pr, issue: ($b | ltrimstr("agent/issue-")), head: $h, giveup: true}]' <<<"$found")
+                continue
+              fi
+              found=$(jq -c --arg pr "$pr" --arg b "$branch" --arg h "$head" \
+                '. + [{pr: $pr, issue: ($b | ltrimstr("agent/issue-")), head: $h, giveup: false}]' <<<"$found")
+            done
+          fi
+          echo "prs=$found" >> "$GITHUB_OUTPUT"
+          if [ "$found" = '[]' ]; then echo "any=false" >> "$GITHUB_OUTPUT"; else echo "any=true" >> "$GITHUB_OUTPUT"; fi
+          echo "to resolve: $found"
+
+  resolve:
+    needs: [find]
+    if: needs.find.outputs.any == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      id-token: write
+      issues: write
+      pull-requests: write
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix:
+        item: ${{ fromJSON(needs.find.outputs.prs) }}
+    # The same group every other stage takes for this issue, so this never races a fix or review.
+    concurrency:
+      group: agent-pipeline/agent/issue-${{ matrix.item.issue }}
+      cancel-in-progress: false
+    steps:
+      - name: Give up after repeated attempts
+        if: matrix.item.giveup
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ matrix.item.pr }}
+        run: |
+          gh pr comment "$PR" --body "Conflict resolution against main has been attempted three times on this head commit without producing a mergeable branch, so it is handed to a human. Resolve the conflict by hand, or remove the \`agent:stuck\` label to let the pipeline try again."
+          gh pr edit "$PR" --add-label 'agent:stuck'
+
+      - name: Checkout main
+        if: ${{ !matrix.item.giveup }}
+        # the PAT below is what pushes this branch, so it has to persist.
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7  # zizmor: ignore[artipacked]
+        with:
+          token: ${{ secrets.AGENT_PUSH_TOKEN }}
+          ref: main
+          fetch-depth: 0
+
+      - name: Record the attempt, and squash the branch onto main
+        if: ${{ !matrix.item.giveup }}
+        id: prep
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ matrix.item.pr }}
+          ISSUE: ${{ matrix.item.issue }}
+          HEAD_SHA: ${{ matrix.item.head }}
+        run: |
+          set -euo pipefail
+          gh pr comment "$PR" --body "Resolving the merge conflict with main. <!-- agent-conflicts-attempt sha=${HEAD_SHA} -->"
+          git config user.name  'agent'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch --quiet origin "agent/issue-${ISSUE}"
+          # The branch moved since the sweep looked: let the next sweep see the new head.
+          if [ "$(git rev-parse FETCH_HEAD)" != "$HEAD_SHA" ]; then
+            echo "::notice::branch moved since the sweep; skipping"; echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          git checkout -B "agent/issue-${ISSUE}" origin/main
+          git merge --squash "origin/agent/issue-${ISSUE}" > /tmp/merge.txt 2>&1 || true
+          cat /tmp/merge.txt
+          git diff --name-only --diff-filter=U > /tmp/conflicts.txt
+          echo "conflicted files: $(wc -l < /tmp/conflicts.txt)"
+          cat /tmp/conflicts.txt
+          # Context for the agent: what each side did, from the merge base.
+          base=$(git merge-base origin/main "origin/agent/issue-${ISSUE}")
+          git log --oneline "$base..origin/main" > /tmp/main-since-base.txt
+          git diff --stat "$base" "origin/agent/issue-${ISSUE}" > /tmp/branch-diffstat.txt
+          gh pr view "$PR" --json title,body --jq '"# " + .title + "\n\n" + .body' > /tmp/pr.md
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Set up the toolchain
+        if: ${{ !matrix.item.giveup && steps.prep.outputs.skip == 'false' }}
+        uses: ./.github/actions/project-setup
+
+      - name: Resolve
+        id: resolve
+        if: ${{ !matrix.item.giveup && steps.prep.outputs.skip == 'false' }}
+        continue-on-error: true
+        uses: anthropics/claude-code-action@1f291e1cfe0f5fc21db2aef19af844591600ade7 # v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            Pull request #${{ matrix.item.pr }} (issue #${{ matrix.item.issue }}) conflicts with
+            main. The working tree is current main with the branch's whole change squash-merged
+            on top of it; the conflicted files are listed in /tmp/conflicts.txt and carry
+            conflict markers. /tmp/pr.md is the PR description, /tmp/main-since-base.txt the
+            commits main gained since the branch forked, /tmp/branch-diffstat.txt what the
+            branch changes. Your job is to produce the tree that contains BOTH sides' work.
+
+            Read CLAUDE.md first. Then, for each conflicted file:
+
+            - Hand-written code and prose: keep both sides' additions. Where both edited the
+              same lines, write the version that is true of the merged tree, not either side's.
+              Never silently drop the other side's work. Where both sides added something with
+              the same identifier or number (a migration, a section, a test name), renumber the
+              branch's one and update the references the branch added to it.
+            - Generated files -- anything a tool in this repository writes: never hand-merge
+              them. Take main's copy (`git checkout origin/main -- <file>`), resolve the inputs,
+              and re-run the generator on the merged tree.
+            - Anything that pins a count or a snapshot of the tree (a test's expected total, a
+              recorded tool output): when the merged tree legitimately moves it because both
+              sides added to it, set it to the measured value. A pin that moves for a reason you
+              cannot explain is a real failure: say so rather than updating it.
+
+            CUSTOMISE: name this repository's generated files, the commands that regenerate
+            them and the order they run in, and anything else about merging here that the
+            rules above do not make concrete enough.
+
+            When no conflict markers remain (`git grep -nE '^(<<<<<<<|>>>>>>>) '` returns
+            nothing), run:
+
+                .github/scripts/agent-gates.sh
+
+            and fix what the merge broke. Do not weaken a gate to pass it. If the two sides
+            genuinely contradict each other and you cannot write something true of both, stop,
+            leave the tree as is, and explain in your final message.
+
+            Do not commit or push. Leave your work in the working tree.
+          claude_args: >-
+            --model opus
+            --effort medium
+            --max-turns 240
+            --allowedTools "Read,Write,Edit,Glob,Grep,Bash"
+            --disallowedTools "Bash(gh:*),Bash(curl:*),Bash(wget:*),Bash(nc:*),Bash(ssh:*),Bash(scp:*),Bash(git push:*),Bash(git remote:*),Bash(git config:*),WebFetch,WebSearch"
+
+      - name: Check and push
+        if: ${{ !matrix.item.giveup && steps.prep.outputs.skip == 'false' && steps.resolve.outcome == 'success' }}
+        env:
+          ISSUE: ${{ matrix.item.issue }}
+          HEAD_SHA: ${{ matrix.item.head }}
+          PR: ${{ matrix.item.pr }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          git add -A
+          if [ -s /tmp/conflicts.txt ] && xargs -r -a /tmp/conflicts.txt git grep --cached -lE '^(<<<<<<<|>>>>>>>) ' -- | grep -q .; then
+            echo "::error::conflict markers remain; not pushing"; exit 1
+          fi
+          if git diff --cached --quiet; then
+            echo "::error::the resolution is empty -- the branch's change would vanish; not pushing"; exit 1
+          fi
+          # The pull request's own title as the subject: a one-commit pull request's squash merge
+          # takes its default title from this commit, and a generic "rebuilt with the conflict
+          # resolved" subject is what landed on main three times before this was noticed.
+          title=$(gh pr view "$PR" --json title --jq .title)
+          git commit -q -m "$title" -m "Rebuilt on main by agent-conflicts.yml with the merge conflict resolved."
+          # Lease on the head the sweep saw, so a fix push that landed meanwhile is not overwritten.
+          git push --force-with-lease="agent/issue-${ISSUE}:${HEAD_SHA}" origin "HEAD:agent/issue-${ISSUE}"
+
+      - name: Report a failed attempt
+        if: ${{ !matrix.item.giveup && steps.prep.outputs.skip == 'false' && (steps.resolve.outcome != 'success' || failure()) }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ matrix.item.pr }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh pr comment "$PR" --body "The conflict-resolution attempt did not produce a pushable branch ($RUN_URL). The retry sweep will try again, up to three attempts on this head commit."

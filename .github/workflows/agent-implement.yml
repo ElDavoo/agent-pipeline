@@ -32,16 +32,19 @@ on:
         required: false
         type: string
 
+# Carries the issue number so agent-retry.yml can tell which issues already have a run in flight.
+run-name: Implement issue #${{ inputs.issue }}
+
 # Granted per job rather than here: a workflow-level block hands the same token to the gate
 # as to the stage that runs the agent, and the gate exists precisely to decide whether the
 # agent should run at all.
 permissions: {}
 
-# The pipeline-wide serial group. agent-plan.yml carries the reasoning, including what happens
-# to a run displaced out of the queue -- for this stage that is the `agent:planned` issue with no
-# pull request that agent-retry.yml's second sweep restarts.
+# The issue's group. agent-plan.yml carries the reasoning, including what happens to a run
+# displaced out of the queue -- for this stage that is the `agent:planned` issue with no pull
+# request that agent-retry.yml's implement sweep restarts.
 concurrency:
-  group: agent-pipeline
+  group: agent-pipeline/agent/issue-${{ inputs.issue }}
   cancel-in-progress: false
 
 jobs:

@@ -91,12 +91,12 @@ jobs:
     # Raised with the turn budgets below. See agent-implement.yml: a job the timeout kills skips
     # its stall record, and the retry sweep only ever sees stages that got to write one.
     timeout-minutes: 120
-    # Per issue, and deliberately *not* the pipeline-wide `agent-pipeline` group the other stages
+    # Per issue, and deliberately *not* the issue's `agent-pipeline/...` group the other stages
     # take. This is a reusable workflow, so it runs inside its caller's run -- and the caller
-    # already holds `agent-pipeline`. Asking for the same group here would queue this job behind
-    # a slot its own parent is holding and never let go of, which is a deadlock until the run
-    # times out. Serialising against the rest of the pipeline is the caller's job; this group
-    # only has to keep the two callers off each other.
+    # already holds that group. Asking for the same group here would queue this job behind a
+    # slot its own parent is holding and never let go of, which is a deadlock until the run
+    # times out. Serialising against the rest of the issue's stages is the caller's job; this
+    # group only has to keep the two callers off each other.
     #
     # Both can fire for the same branch at once -- a red CI run and a review that requested
     # changes are independent events and routinely arrive together. Without this they race, and

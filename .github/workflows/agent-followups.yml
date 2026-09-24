@@ -47,6 +47,13 @@ on:
         required: true
         type: number
 
+# Carries the PR number on a dispatched run so agent-retry.yml can tell it is in flight; an event
+# run is recognised by its head branch instead.
+run-name: >-
+  ${{ github.event_name == 'workflow_dispatch'
+      && format('Follow-ups for PR #{0}', inputs.pr)
+      || github.event.pull_request.title }}
+
 permissions: {}
 
 jobs:
@@ -67,7 +74,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
           PR: ${{ inputs.pr }}
         run: |
-          gh pr comment "$PR" --body "Follow-up pass for this merge queued — the pipeline runs one agent at a time. <!-- agent-followups-queued -->"
+          gh pr comment "$PR" --body "Follow-up pass for this merge queued. <!-- agent-followups-queued -->"
 
   followups:
     needs: [queue]
@@ -78,9 +85,11 @@ jobs:
       && (github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true)
     # On the job, not the workflow: `pull_request: closed` fires on every close, most of which
     # are not merges, and a workflow-level group claims its slot before this `if:` runs, taking the
-    # single pending slot for nothing. See README.md, "One agent runs at a time".
+    # group's single pending slot for nothing. The group is per pull request, since a follow-up
+    # pass belongs to a merge rather than to an open issue. See README.md, "How many agents run
+    # at once".
     concurrency:
-      group: agent-pipeline
+      group: agent-pipeline/followups-${{ github.event.pull_request.number || inputs.pr }}
       cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 20

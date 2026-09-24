@@ -40,35 +40,40 @@ run-name: >-
 # agent should run at all.
 permissions: {}
 
-# One group for the whole pipeline rather than one per issue, and never cancelling. Every stage
-# that runs Claude names this same group, so at most one of them is ever in flight -- plan,
-# implement, review and the fix stage queue behind each other across issues as much as within
-# one. This comment is the canonical copy; the other stages point back at it. The group itself
-# is declared on the plan job below, not here -- why is the last paragraph.
+# One group per issue -- `agent-pipeline/agent/issue-N` -- and never cancelling. Every stage that
+# runs Claude for an issue names that issue's group, so plan, implement, review and the fix stage
+# queue behind each other within one issue while different issues run side by side. This comment
+# is the canonical copy; the other stages point back at it. The group itself is declared on the
+# plan job below, not here -- why is the last paragraph.
 #
-# It is a token budget rather than a correctness rule. A Claude subscription window is about five
-# hours, and three agent runs sharing one spend it three times as fast without any of them
-# getting further: what that looks like is every stage stopping at its turn limit at once, so a
-# window buys several half-finished branches instead of one merged pull request. Serialised, the
-# same window pays for runs that finish. If you are running on an API key metered per token
-# rather than a subscription window, this group is the first thing to loosen.
+# How many run at once is a token budget, and two knobs set it: MAX_OPEN_AGENT_PRS below caps how
+# many issues are in play, and MAX_PARALLEL_AGENTS in agent-retry.yml caps how many runs the retry
+# sweep -- the only thing that starts work other than GitHub events -- lets be in flight. A Claude
+# subscription window is about five hours, and N runs sharing one spend it N times as fast;
+# past some point every stage stops at its turn limit at once, and a window buys several
+# half-finished branches instead of merged pull requests. Parallel branches also conflict with
+# each other as they merge, and each conflict costs an agent-conflicts.yml run to resolve: on one
+# repository ten in parallel produced more conflicts than merges, and five did not. Set both to 1
+# for the strictly serial pipeline this used to be. On an API key metered per token rather than a
+# subscription window, only the conflict half of this argument is left.
 #
-# The cost is GitHub's queue depth, which is one. A group holds one run in flight and exactly one
-# pending, and a *third* arrival cancels the pending one rather than lining up behind it -- before
-# its first step, so nothing it would have written gets written. For the implement stage that
+# The cost is GitHub's queue depth, which is one per group. A group holds one run in flight and
+# exactly one pending, and a *third* arrival cancels the pending one rather than lining up behind
+# it -- before its first step, so nothing it would have written gets written. For the implement stage that
 # loss is recovered: it leaves the issue labelled `agent:planned` with no pull request, which is
-# the signature agent-retry.yml's second sweep looks for.
+# the signature agent-retry.yml's implement sweep looks for.
 #
 # For this stage the same loss used to be unrecoverable, because a plan that never ran left
 # nothing behind to sweep for. So the group is taken by the plan job only, and triage -- which
 # runs straight away, outside it -- leaves the trace itself: an issue it has cleared to run is
 # labelled `agent:queued`, and only a plan that actually finishes swaps that for `agent:planned`.
 # An open issue still labelled `agent:queued` with nothing after it is one whose plan never ran,
-# and agent-retry.yml's third sweep dispatches this workflow for it.
+# and agent-retry.yml's plan sweep dispatches this workflow for it.
 
 env:
-  # A cap on work in flight, not on work queued -- see the capacity step below.
-  MAX_OPEN_AGENT_PRS: '3'
+  # A cap on work in flight, not on work queued -- see the capacity step below. CUSTOMISE, and
+  # keep equal to the copy in agent-retry.yml's plan sweep.
+  MAX_OPEN_AGENT_PRS: '5'
 
 jobs:
   # Who filed it decides whether this runs unattended, and the question asked is "could this
@@ -204,10 +209,10 @@ jobs:
       && needs.gate.result != 'cancelled'
     # On this job rather than the workflow, so triage and the gate run outside the group: triage
     # has to leave its `agent:queued` trace even when this job is about to be displaced, and an
-    # outside issue waiting on approval should not hold the pipeline's one pending slot while it
+    # outside issue waiting on approval should not hold its group's one pending slot while it
     # waits. See the canonical comment at the top of this file.
     concurrency:
-      group: agent-pipeline
+      group: agent-pipeline/agent/issue-${{ github.event.issue.number || inputs.issue }}
       cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 20

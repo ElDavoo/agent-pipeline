@@ -10,6 +10,13 @@ name: Agent · review
 # self-approval block from firing. It requires Settings -> Actions -> "Allow GitHub Actions to
 # create and approve pull requests"; see README.md.
 #
+# One review per run, posted as github-actions[bot]. This stage used to run a second, inline pass
+# too (the code-review plugin, posting as claude[bot]): readers got a body-less claude[bot]
+# review per remark beside a verdict whose summary was one unformatted paragraph. Now the verdict
+# returns its findings as structured data -- file, line, problem, fix, whether each blocks, and
+# what it re-checked itself -- and "Unpack the verdict" renders them as the review's markdown
+# body, which is also the whole payload the fix stage gets.
+#
 # There is no human downstream of this stage. The prompt says so, deliberately: a reviewer that
 # believes someone will catch its misses drifts one way, and one that believes it is the last
 # gate drifts the other, and the second drift is the one this pipeline can afford.
@@ -32,14 +39,14 @@ on:
 # agent should run at all.
 permissions: {}
 
-# The pipeline-wide serial group; agent-plan.yml carries the reasoning. cancel-in-progress had to
-# go from true to false along with it, and not only because a shared group must never cancel
-# across stages -- with it still set, a push to any agent branch would cancel whatever implement
-# or fix run happened to hold the group. What it used to buy is bought by the queue instead: a
-# group holds one pending run, so a burst of pushes to the same branch displaces the older
-# waiting reviews and leaves the newest, which is the one worth running anyway.
+# The issue's group, named by its branch; agent-plan.yml carries the reasoning. It never cancels,
+# and not only because a shared group must never cancel across stages -- with cancel-in-progress
+# set, a push to the branch would cancel whatever implement or fix run happened to hold the
+# group. What cancelling would have bought is bought by the queue instead: a group holds one
+# pending run, so a burst of pushes to the same branch displaces the older waiting reviews and
+# leaves the newest, which is the one worth running anyway.
 concurrency:
-  group: agent-pipeline
+  group: agent-pipeline/${{ github.head_ref || github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -80,13 +87,9 @@ jobs:
           echo "issue=$issue" >> "$GITHUB_OUTPUT"
           echo "author=$(gh issue view "$issue" --json author --jq .author.login)" >> "$GITHUB_OUTPUT"
 
-      # The verdict, as data. It is a separate pass from the inline review further down because a
-      # merge gate must be a value the workflow can branch on rather than prose someone has to
-      # parse -- and it goes *first*, which it did not, because this is the pass that decides
-      # whether the run survives at all. A review run measured here spent 6m43s on the inline
-      # pass, posted nothing, and then lost the verdict in ten seconds; everything the inline
-      # pass had cost went with the failed run, and the retry re-ran both from scratch. In this
-      # order a stall costs ten seconds of the window instead of seven minutes.
+      # The verdict, as data: a merge gate must be a value the workflow can branch on rather than
+      # prose someone has to parse. Its findings are data too, and rendered to markdown below,
+      # so the review reads the same whatever the model's prose habits.
       - name: Verdict
         id: verdict
         # See agent-plan.yml. A stalled verdict is the quietest failure in the pipeline: CI goes
@@ -121,32 +124,43 @@ jobs:
             issue here specifically — add them as bullets above, phrased the same way: a thing
             to block on, not a style preference.
 
-            Do not block on style, naming, or preference. A second pass runs after you and leaves
-            those inline on the pull request; they are not yours to raise here. A change that is
-            correct and tested but that you would have written differently is an approval.
+            Do not block on style, naming, or preference. You may leave those as non-blocking
+            suggestions; keep them few and worth the author's time. A change that is correct and
+            tested but that you would have written differently is an approval.
+
+            Your findings are the only review this pull request gets, and when you block, the fix
+            stage works from them and nothing else. So each finding must stand on its own: the
+            file and line it is about, what is wrong and the evidence for it, and what would
+            resolve it. Write every text field as GitHub markdown -- backticks for paths,
+            symbols and commands, short sentences -- and keep `summary` to two to four
+            sentences; the lists go in `findings` and `verified`, which are rendered as the
+            review.
 
             Return the verdict. If you approve, also return the final squash commit message:
             the title and body this should merge under, in house style — lowercase plain-language
             subject, body explaining the reasoning and the evidence, not restating the diff. If
             the approach changed while the branch was being fixed, describe what actually
             landed, not what was originally planned.
-          # Bash(git:*) rather than four enumerated git prefixes, and the read-only gh verbs, for
-          # the reasons set out on the inline pass below: this is the merge gate, a denial costs
-          # it a turn, and an enumeration is a list of what someone thought of. Task is here
-          # because a judgement this consequential should be able to farm out a question it wants
-          # a second read on, the way the plugin does.
+          # Bash(git:*) rather than four enumerated git prefixes, and the read-only gh verbs:
+          # this is the merge gate, a denial costs it a turn, and an enumeration is a list of
+          # what someone thought of. Task is here because a judgement this consequential should
+          # be able to farm out a question it wants a second read on.
           #
-          # gh pr comment is denied here though the inline pass is allowed it. The two are not the
-          # same job: that one is the reviewer and talks to the author, this one is the gate and
-          # its whole output is the verdict object. A gate that can also write prose onto the
-          # pull request has a second channel nothing reads, and can say something the verdict
-          # does not.
+          # What keeps this safe is the allowlist being default-deny: a gh verb absent from it is
+          # refused without anyone having had to predict it. The denies below are redundant on
+          # paper, and are here anyway because the cost of being wrong is the gate approving
+          # itself or rewriting what judges it.
+          #
+          # gh pr comment and gh pr review are denied: this stage's whole output is the verdict
+          # object, which the steps below post. A gate that can also write prose onto the pull
+          # request has a second channel nothing reads, and can say something the verdict does
+          # not.
           claude_args: >-
             --model opus
             --effort medium
             --allowedTools "Task,Read,Glob,Grep,Bash(git:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr list:*),Bash(gh issue view:*),Bash(gh issue list:*),Bash(rg:*),Bash(jq:*),Bash(find:*),Bash(ls:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(wc:*),Bash(sort:*),Bash(uniq:*),Bash(diff:*)"
             --disallowedTools "Write,Edit,Bash(gh pr review:*),Bash(gh pr merge:*),Bash(gh pr edit:*),Bash(gh pr comment:*),Bash(gh api:*),Bash(gh workflow:*),Bash(gh run:*),Bash(gh secret:*),Bash(gh ruleset:*),Bash(curl:*),Bash(wget:*),Bash(nc:*),Bash(ssh:*),Bash(scp:*),Bash(git push:*),Bash(git remote:*),Bash(git config:*),WebFetch,WebSearch"
-            --json-schema '{"type":"object","properties":{"approved":{"type":"boolean","description":"True to approve and let this merge"},"blocking":{"type":"integer","description":"Number of blocking findings"},"summary":{"type":"string","description":"One paragraph: what this does and why it is or is not mergeable"},"final_title":{"type":"string","description":"Squash commit subject, lowercase, house style"},"final_body":{"type":"string","description":"Squash commit body: reasoning and evidence"}},"required":["approved","blocking","summary","final_title","final_body"]}'
+            --json-schema '{"type":"object","properties":{"approved":{"type":"boolean","description":"True to approve and let this merge"},"summary":{"type":"string","description":"Two to four sentences of GitHub markdown: what this pull request does and why it is or is not mergeable. No lists; those go in findings and verified"},"findings":{"type":"array","description":"Every blocking finding, then any non-blocking suggestion worth leaving. Empty when there is nothing to raise","items":{"type":"object","properties":{"blocking":{"type":"boolean","description":"True if this alone stops the merge"},"file":{"type":"string","description":"Repository path the finding is about, or empty for the pull request as a whole"},"line":{"type":"integer","description":"Line in the head version of that file, or 0"},"problem":{"type":"string","description":"Markdown: what is wrong, and the evidence you checked it against"},"fix":{"type":"string","description":"Markdown: what would resolve it"}},"required":["blocking","file","line","problem","fix"]}},"verified":{"type":"array","description":"Claims you re-checked yourself, one short markdown line each, naming the command or file that checked it","items":{"type":"string"}},"final_title":{"type":"string","description":"Squash commit subject, lowercase, house style"},"final_body":{"type":"string","description":"Squash commit body: reasoning and evidence"}},"required":["approved","summary","findings","verified","final_title","final_body"]}'
 
       - name: Record a stall
         if: steps.verdict.outcome != 'success' || steps.verdict.outputs.conclusion != 'success'
@@ -170,65 +184,38 @@ jobs:
           OUT: ${{ steps.verdict.outputs.structured_output }}
         run: |
           set -euo pipefail
-          jq -r '.summary'     <<<"$OUT" > /tmp/summary.txt
           jq -r '.final_title' <<<"$OUT" > /tmp/final-title.txt
           jq -r '.final_body'  <<<"$OUT" > /tmp/final-body.txt
           echo "approved=$(jq -r '.approved | tostring' <<<"$OUT")" >> "$GITHUB_OUTPUT"
-
-      # The inline findings, using the same plugin invocation the repository already used for
-      # human-authored pull requests. It runs after the verdict and not before it -- the note on
-      # that step says why -- and unconditionally either way: these comments are the payload the
-      # fix stage is handed when the verdict blocks, and the non-blocking remarks worth leaving
-      # when it does not.
-      - name: Inline review
-        continue-on-error: true
-        uses: anthropics/claude-code-action@1f291e1cfe0f5fc21db2aef19af844591600ade7 # v1
-        with:
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
-          plugins: 'code-review@claude-code-plugins'
-          prompt: '/code-review:code-review --comment ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
-          # --allowedTools is an allowlist, not an addition to a default, so this has to name
-          # everything the plugin's procedure actually uses -- and that procedure is subagents
-          # almost end to end. commands/code-review.md dispatches a Haiku triage agent, a Haiku
-          # CLAUDE.md locator, a Haiku summariser, five parallel Sonnet reviewers and one Haiku
-          # scorer per finding, then posts with `gh`. Without Task it has no way to perform a
-          # single one of its steps, and a blanket Bash(gh:*) denial takes the rest: the
-          # plugin's own frontmatter declares seven gh verbs and every one of them was denied.
-          #
-          # Run 33022803884 was that with no read tools at all -- ten denials, nothing posted.
-          # Run 33035520610 was that with the read tools and still no Task or gh: seven denials,
-          # and the top-level model fell off the procedure entirely, reviewed the diff by hand
-          # and reported in its approval that it had "left inline" a remark that does not exist.
-          # The action's own post-step logged "No buffered inline comments" both times.
-          #
-          # What keeps this safe is the allowlist being default-deny: a gh verb absent from it is
-          # refused without anyone having had to predict it, which is the property an enumerated
-          # deny-list does not have. The denies below are therefore redundant on paper, and are
-          # here anyway because this stage is the merge gate and the cost of being wrong is it
-          # approving itself or rewriting what judges it. Prefix matching on a chained command
-          # is not a thing worth betting the gate on.
-          claude_args: >-
-            --model opus
-            --effort medium
-            --allowedTools "mcp__github_inline_comment__create_inline_comment,Task,Read,Glob,Grep,Bash(git:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr list:*),Bash(gh pr comment:*),Bash(gh issue view:*),Bash(gh issue list:*),Bash(gh search:*),Bash(rg:*),Bash(jq:*),Bash(find:*),Bash(ls:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(wc:*),Bash(sort:*),Bash(uniq:*),Bash(diff:*)"
-            --disallowedTools "Write,Edit,Bash(gh pr review:*),Bash(gh pr merge:*),Bash(gh pr edit:*),Bash(gh api:*),Bash(gh workflow:*),Bash(gh run:*),Bash(gh secret:*),Bash(gh ruleset:*),Bash(curl:*),Bash(wget:*),Bash(nc:*),Bash(ssh:*),Bash(scp:*),Bash(git push:*),Bash(git remote:*),Bash(git config:*),WebFetch,WebSearch"
+          # The review body. Continuation lines are indented so a multi-line problem stays inside
+          # its list item.
+          jq -r '
+            def indent: gsub("\n"; "\n  ");
+            def loc: if .file == "" then "" else "`\(.file)\(if .line > 0 then ":\(.line)" else "" end)`: " end;
+            def item: "- \(loc)\(.problem | indent)"
+                      + (if .fix == "" then "" else "\n\n  **Fix:** \(.fix | indent)" end);
+            [ .findings[] | select(.blocking) ] as $b
+            | [ .findings[] | select(.blocking | not) ] as $s
+            | [ (if .approved then "**Approved.**"
+                 else "**Changes requested:** \($b | length) blocking finding\(if ($b | length) == 1 then "" else "s" end)."
+                 end),
+                "",
+                .summary,
+                (if ($b | length) > 0 then "", "### Blocking", "", ($b[] | item, "") else empty end),
+                (if ($s | length) > 0 then "", "### Suggestions (non-blocking)", "", ($s[] | item, "") else empty end),
+                (if (.verified | length) > 0
+                 then "", "<details><summary>Checked by the reviewer</summary>", "", (.verified[] | "- \(.)"), "", "</details>"
+                 else empty end)
+              ] | join("\n")' <<<"$OUT" > /tmp/review.md
 
       - name: Capture the findings for the fix stage
         id: findings
         if: steps.unpack.outputs.approved != 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
           {
             echo 'text<<REVIEW_EOF'
-            cat /tmp/summary.txt ; printf '\n'
-            echo 'Inline comments left on the pull request:'
-            gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}/comments" \
-              --jq '.[] | "- \(.path):\(.line // .original_line) — \(.body)"' | tail -c 20000
-            echo ''
+            head -c 20000 /tmp/review.md ; printf '\n'
             echo 'REVIEW_EOF'
           } >> "$GITHUB_OUTPUT"
 
@@ -249,14 +236,14 @@ jobs:
             printf '\nCloses #%s.\n' "$ISSUE"
           } > /tmp/pr-final.md
           gh pr edit "$PR" --title "$(cat /tmp/final-title.txt)" --body-file /tmp/pr-final.md
-          gh pr review "$PR" --approve --body-file /tmp/summary.txt
+          gh pr review "$PR" --approve --body-file /tmp/review.md
 
       - name: Request changes
         if: steps.unpack.outputs.approved != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR: ${{ github.event.pull_request.number }}
-        run: gh pr review "$PR" --request-changes --body-file /tmp/summary.txt
+        run: gh pr review "$PR" --request-changes --body-file /tmp/review.md
 
   fix:
     permissions:
