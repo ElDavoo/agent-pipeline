@@ -52,6 +52,13 @@ builds — so the workflows here describe how agents work rather than being run 
   the fix stage never sees. A second reviewing pass (the old inline one, posting as `claude[bot]`)
   doubles the reviews on every pull request. A free-text summary field brings back the
   one-paragraph blob.
+- **The review has three verdicts, and reject is not a big request for changes.** `rejected`
+  closes the pull request, deletes its branch, writes the review and the rejected plan on top
+  of the issue body, and requeues the issue for a fresh plan; the second rejection of an issue
+  hands it to a human. It is for work that would have to start over, so its findings are
+  guidance for the next plan rather than patches for the fix stage. Without it the only exits
+  are ten fix rounds ending in a draft, or a human's `agent:stop`. A verdict with both
+  `approved` and `rejected` set is read as a rejection, never as a merge.
 - **A schedule is a fallback, not a clock.** GitHub drops `schedule:` events under load without
   saying so, which is why `agent-retry.yml` also runs on `workflow_run` and `push`. Anything that
   has to happen soon after an event should be triggered by that event.

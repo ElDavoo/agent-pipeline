@@ -17,6 +17,14 @@ name: Agent · review
 # what it re-checked itself -- and "Unpack the verdict" renders them as the review's markdown
 # body, which is also the whole payload the fix stage gets.
 #
+# Three verdicts, not two: approve, request changes, or reject. Request-changes starts a fix
+# round, and without a third answer a pull request whose approach is wrong can only be fixed
+# forward -- up to ten rounds, holding an open-PR slot the whole time, and ending as a draft
+# rather than a decision. A rejected pull request is closed with its branch deleted, the issue
+# body gets the review and the rejected plan on top so the next plan reads why, and the issue
+# goes back to `agent:queued` for agent-retry.yml to plan again. A second rejection of the same
+# issue hands it to a human (`agent:stuck`) instead.
+#
 # There is no human downstream of this stage. The prompt says so, deliberately: a reviewer that
 # believes someone will catch its misses drifts one way, and one that believes it is the last
 # gate drifts the other, and the second drift is the one this pipeline can afford.
@@ -65,6 +73,7 @@ jobs:
     timeout-minutes: 30
     outputs:
       approved: ${{ steps.unpack.outputs.approved }}
+      rejected: ${{ steps.unpack.outputs.rejected }}
       findings: ${{ steps.findings.outputs.text }}
       issue: ${{ steps.ctx.outputs.issue }}
       author: ${{ steps.ctx.outputs.author }}
@@ -124,6 +133,16 @@ jobs:
             issue here specifically — add them as bullets above, phrased the same way: a thing
             to block on, not a style preference.
 
+            Reject, rather than request changes, only when fixing the findings would mean
+            starting over: the approach cannot deliver what the issue asks, the issue was
+            misread so the diff answers a different question, or the claim the pull request
+            rests on is false and nothing around it stands without it. Many findings, or
+            laborious ones, are not a reason to reject; findings the fix stage can work through
+            are a request for changes. A rejected pull request is closed and the issue is
+            planned again from scratch, with your summary and findings in front of the new
+            plan, so write the `fix` fields as guidance for that new attempt: what it must do
+            differently, not how to patch this diff.
+
             Do not block on style, naming, or preference. You may leave those as non-blocking
             suggestions; keep them few and worth the author's time. A change that is correct and
             tested but that you would have written differently is an approval.
@@ -136,9 +155,11 @@ jobs:
             sentences; the lists go in `findings` and `verified`, which are rendered as the
             review.
 
-            Return the verdict. If you approve, also return the final squash commit message:
-            the title and body this should merge under, in house style — lowercase plain-language
-            subject, body explaining the reasoning and the evidence, not restating the diff. If
+            Return the verdict: `approved` true to merge, `rejected` true to close (never both;
+            both false requests changes). If you approve, also return the final squash commit
+            message: the title and body this should merge under, in house style — lowercase
+            plain-language subject, body explaining the reasoning and the evidence, not
+            restating the diff. If
             the approach changed while the branch was being fixed, describe what actually
             landed, not what was originally planned.
           # Bash(git:*) rather than four enumerated git prefixes, and the read-only gh verbs:
@@ -160,7 +181,7 @@ jobs:
             --effort medium
             --allowedTools "Task,Read,Glob,Grep,Bash(git:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr list:*),Bash(gh issue view:*),Bash(gh issue list:*),Bash(rg:*),Bash(jq:*),Bash(find:*),Bash(ls:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(wc:*),Bash(sort:*),Bash(uniq:*),Bash(diff:*)"
             --disallowedTools "Write,Edit,Bash(gh pr review:*),Bash(gh pr merge:*),Bash(gh pr edit:*),Bash(gh pr comment:*),Bash(gh api:*),Bash(gh workflow:*),Bash(gh run:*),Bash(gh secret:*),Bash(gh ruleset:*),Bash(curl:*),Bash(wget:*),Bash(nc:*),Bash(ssh:*),Bash(scp:*),Bash(git push:*),Bash(git remote:*),Bash(git config:*),WebFetch,WebSearch"
-            --json-schema '{"type":"object","properties":{"approved":{"type":"boolean","description":"True to approve and let this merge"},"summary":{"type":"string","description":"Two to four sentences of GitHub markdown: what this pull request does and why it is or is not mergeable. No lists; those go in findings and verified"},"findings":{"type":"array","description":"Every blocking finding, then any non-blocking suggestion worth leaving. Empty when there is nothing to raise","items":{"type":"object","properties":{"blocking":{"type":"boolean","description":"True if this alone stops the merge"},"file":{"type":"string","description":"Repository path the finding is about, or empty for the pull request as a whole"},"line":{"type":"integer","description":"Line in the head version of that file, or 0"},"problem":{"type":"string","description":"Markdown: what is wrong, and the evidence you checked it against"},"fix":{"type":"string","description":"Markdown: what would resolve it"}},"required":["blocking","file","line","problem","fix"]}},"verified":{"type":"array","description":"Claims you re-checked yourself, one short markdown line each, naming the command or file that checked it","items":{"type":"string"}},"final_title":{"type":"string","description":"Squash commit subject, lowercase, house style"},"final_body":{"type":"string","description":"Squash commit body: reasoning and evidence"}},"required":["approved","summary","findings","verified","final_title","final_body"]}'
+            --json-schema '{"type":"object","properties":{"approved":{"type":"boolean","description":"True to approve and let this merge"},"rejected":{"type":"boolean","description":"True to close this pull request and have the issue planned again: only when fixing the findings would mean starting over. Never true together with approved"},"summary":{"type":"string","description":"Two to four sentences of GitHub markdown: what this pull request does and why it is or is not mergeable. No lists; those go in findings and verified"},"findings":{"type":"array","description":"Every blocking finding, then any non-blocking suggestion worth leaving. Empty when there is nothing to raise","items":{"type":"object","properties":{"blocking":{"type":"boolean","description":"True if this alone stops the merge"},"file":{"type":"string","description":"Repository path the finding is about, or empty for the pull request as a whole"},"line":{"type":"integer","description":"Line in the head version of that file, or 0"},"problem":{"type":"string","description":"Markdown: what is wrong, and the evidence you checked it against"},"fix":{"type":"string","description":"Markdown: what would resolve it"}},"required":["blocking","file","line","problem","fix"]}},"verified":{"type":"array","description":"Claims you re-checked yourself, one short markdown line each, naming the command or file that checked it","items":{"type":"string"}},"final_title":{"type":"string","description":"Squash commit subject, lowercase, house style"},"final_body":{"type":"string","description":"Squash commit body: reasoning and evidence"}},"required":["approved","rejected","summary","findings","verified","final_title","final_body"]}'
 
       - name: Record a stall
         if: steps.verdict.outcome != 'success' || steps.verdict.outputs.conclusion != 'success'
@@ -186,7 +207,10 @@ jobs:
           set -euo pipefail
           jq -r '.final_title' <<<"$OUT" > /tmp/final-title.txt
           jq -r '.final_body'  <<<"$OUT" > /tmp/final-body.txt
-          echo "approved=$(jq -r '.approved | tostring' <<<"$OUT")" >> "$GITHUB_OUTPUT"
+          # A verdict that sets both is read as a rejection: the failure to guard against is
+          # merging something the reviewer also said to throw away.
+          echo "approved=$(jq -r '(.approved and (.rejected | not)) | tostring' <<<"$OUT")" >> "$GITHUB_OUTPUT"
+          echo "rejected=$(jq -r '.rejected | tostring' <<<"$OUT")" >> "$GITHUB_OUTPUT"
           # The review body. Continuation lines are indented so a multi-line problem stays inside
           # its list item.
           jq -r '
@@ -196,7 +220,8 @@ jobs:
                       + (if .fix == "" then "" else "\n\n  **Fix:** \(.fix | indent)" end);
             [ .findings[] | select(.blocking) ] as $b
             | [ .findings[] | select(.blocking | not) ] as $s
-            | [ (if .approved then "**Approved.**"
+            | [ (if .rejected then "**Rejected.** This pull request is closed and the issue goes back to be planned again; the findings below are what the next attempt has to do differently."
+                 elif .approved then "**Approved.**"
                  else "**Changes requested:** \($b | length) blocking finding\(if ($b | length) == 1 then "" else "s" end)."
                  end),
                 "",
@@ -210,7 +235,7 @@ jobs:
 
       - name: Capture the findings for the fix stage
         id: findings
-        if: steps.unpack.outputs.approved != 'true'
+        if: steps.unpack.outputs.approved != 'true' && steps.unpack.outputs.rejected != 'true'
         run: |
           set -euo pipefail
           {
@@ -239,11 +264,58 @@ jobs:
           gh pr review "$PR" --approve --body-file /tmp/review.md
 
       - name: Request changes
-        if: steps.unpack.outputs.approved != 'true'
+        if: steps.unpack.outputs.approved != 'true' && steps.unpack.outputs.rejected != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR: ${{ github.event.pull_request.number }}
         run: gh pr review "$PR" --request-changes --body-file /tmp/review.md
+
+      # The PAT closes the pull request and deletes the branch, because this job's GITHUB_TOKEN
+      # is contents: read. The issue body is rewritten before the labels change, so a plan the
+      # sweep starts as soon as `agent:queued` appears cannot read the old plan without the
+      # rejection above it.
+      - name: Reject
+        if: steps.unpack.outputs.rejected == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PUSH_TOKEN: ${{ secrets.AGENT_PUSH_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          ISSUE: ${{ steps.ctx.outputs.issue }}
+          # CUSTOMISE: how many rejections of one issue before a human takes it.
+          MAX_REJECTIONS: '2'
+        run: |
+          set -euo pipefail
+          gh pr review "$PR" --request-changes --body-file /tmp/review.md
+          GH_TOKEN="$PUSH_TOKEN" gh pr close "$PR" --delete-branch \
+            --comment "Rejected by the review stage: see the review above. The issue goes back to be planned again."
+
+          rejections=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/issues/${ISSUE}/comments" \
+                         --jq '[.[] | select(.user.type == "Bot") | .body
+                                    | select(test("<!-- agent-rejected -->"))] | length')
+          rejections=$(( rejections + 1 ))
+
+          gh issue view "$ISSUE" --json body --jq .body > /tmp/old-body.md
+          {
+            printf '## Attempt %s was rejected (PR #%s)\n\n' "$rejections" "$PR"
+            printf 'Planning again, read this first: the review below is why the last attempt was closed rather than fixed.\n\n'
+            cat /tmp/review.md
+            printf '\n\n<details><summary>The plan that was rejected</summary>\n\n'
+            cat /tmp/old-body.md
+            printf '\n</details>\n'
+          } > /tmp/new-body.md
+          gh issue edit "$ISSUE" --body-file /tmp/new-body.md
+
+          if [ "$rejections" -ge "$MAX_REJECTIONS" ]; then
+            gh issue comment "$ISSUE" --body "PR #${PR} was rejected, and that is rejection ${rejections} of this issue, so it is being handed to a human rather than planned again. Remove the \`agent:stuck\` label and add \`agent:queued\` to let the pipeline try once more. <!-- agent-rejected -->"
+            gh issue edit "$ISSUE" --add-label 'agent:stuck'
+          else
+            gh issue comment "$ISSUE" --body "PR #${PR} was rejected (rejection ${rejections} of ${MAX_REJECTIONS}). The review is now at the top of this issue, and the retry sweep will plan it again from here. <!-- agent-rejected -->"
+            gh issue edit "$ISSUE" --add-label 'agent:queued'
+          fi
+          # Separate and allowed to fail, like agent-plan.yml's removal of `agent:queued`: an
+          # issue carries one of these, not both, and removing an absent label is an error.
+          gh issue edit "$ISSUE" --remove-label 'agent:working' || true
+          gh issue edit "$ISSUE" --remove-label 'agent:planned' || true
 
   fix:
     permissions:
@@ -252,7 +324,7 @@ jobs:
       issues: write
       pull-requests: write
     needs: [review]
-    if: needs.review.outputs.approved == 'false'
+    if: needs.review.outputs.approved == 'false' && needs.review.outputs.rejected != 'true'
     uses: ./.github/workflows/agent-fix.yml
     secrets:
       AGENT_PUSH_TOKEN: ${{ secrets.AGENT_PUSH_TOKEN }}
