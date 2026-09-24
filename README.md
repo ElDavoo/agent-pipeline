@@ -22,8 +22,8 @@ issue opened
      |
      +---------------------------+
      |                           |
-  CI (yours)              Agent · review     one verdict, its findings rendered as markdown
-     |                           |
+  CI (yours)              Agent · review     approve, request changes, or reject
+     |                           |           (reject: close the PR, re-plan the issue)
      +----------> Agent · fix <--+           up to 10 rounds, 9 is an escalation
      |
      +-- [Agent · conflicts if another merge left it conflicting with main]
@@ -212,6 +212,7 @@ Everything below is a deliberate default, not a constant. All of it is in the wo
 | Setting | Where | Default |
 |---|---|---|
 | Fix rounds before giving up | `agent-fix.yml` | 10, with round 9 as an escalation |
+| Rejections per issue before a human takes it | `agent-review.yml`, `MAX_REJECTIONS` | 2: the first re-plans the issue, the second applies `agent:stuck` |
 | Concurrent agent pull requests | `agent-plan.yml`, `MAX_OPEN_AGENT_PRS`, and its copy in `agent-retry.yml` | 5 |
 | Stall retries per stage | `agent-retry.yml`, `MAX_RETRIES` | 3, five hours apart |
 | Queue restarts per issue | `agent-retry.yml`, `MAX_RETRIES` on each queue sweep | 3 |
@@ -264,7 +265,7 @@ by someone who could not have pushed the change themselves.
 |---|---|---|
 | `agent:stop` | you | **The kill switch, and the one that always works.** Blocks every stage *and* cancels what is running. Issue or pull request, any time. |
 | `no-agent` | you | Never touch this issue. **Only works applied at creation** — the *Note to self* issue template applies it for you. |
-| `agent:queued` | pipeline | Cleared to plan, waiting for its turn. Still there with nothing after it means the plan was displaced; the sweeper will plan it. |
+| `agent:queued` | pipeline | Cleared to plan, waiting for its turn. Still there with nothing after it means the plan was displaced; the sweeper will plan it. Also where a rejected pull request sends its issue back to. |
 | `agent:planned` | pipeline | Planned, waiting to be implemented. |
 | `agent:working` | pipeline | Being implemented. |
 | `agent:stalled` | pipeline | A stage stopped before finishing; the sweeper will re-run it. |
