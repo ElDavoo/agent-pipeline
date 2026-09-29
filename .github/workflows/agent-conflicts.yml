@@ -140,6 +140,9 @@ jobs:
         if: matrix.item.giveup
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # nothing is checked out on this path, so gh cannot infer the repo;
+          # without this the label is never added and the retry sweep loops.
+          GH_REPO: ${{ github.repository }}
           PR: ${{ matrix.item.pr }}
         run: |
           gh pr comment "$PR" --body "Conflict resolution against main has been attempted three times on this head commit without producing a mergeable branch, so it is handed to a human. Resolve the conflict by hand, or remove the \`agent:stuck\` label to let the pipeline try again."
